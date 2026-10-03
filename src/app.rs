@@ -26,6 +26,8 @@ pub(crate) enum Op {
     SetDefaultMangoHud,
     SetLsfg,
     SetPerGamePath(String),
+    MoveGame(String),
+    DoMoveGame { app: String, dest: String },
     SetPerGamePrefix(String),
     SetPerGameLaunchArgs(String),
     SetPerGameProton(String),
@@ -734,6 +736,85 @@ impl App {
             Op::Play(app) => self.launch_game(&app),
             Op::Details(_) => {}
             Op::Update(app) => self.start_in_app_install(&app),
+            Op::MoveGame(app) => {
+                if app.is_empty() {
+                    self.say("Select an installed game first.");
+                    return;
+                }
+                let title = self.title_of(&app);
+                let cur_path = self
+                    .games
+                    .iter()
+                    .find(|g| g.app_name == app)
+                    .and_then(|g| g.install_path.clone())
+                    .unwrap_or_else(|| "Unknown".into());
+
+                let guard = match process::SuspendGuard::suspend() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        self.say(format!("terminal suspend failed: {e}"));
+                        return;
+                    }
+                };
+                let picked =
+                    crate::filesystem::pick_directory_fzf(&self.cfg.default_install_path, &title);
+                guard.disarm();
+                self.suspended = true;
+
+                if let Some(dest) = picked {
+                    let dest = dest.trim().to_string();
+                    if !dest.is_empty() {
+                        self.mode = Mode::Confirm {
+                            lines: vec![
+                                format!("Move {title}?"),
+                                format!("Current path:     {cur_path}"),
+                                format!("Destination base: {dest}"),
+                                "".into(),
+                                "Legendary will move game files and update database.".into(),
+                            ],
+                            op: Op::DoMoveGame { app, dest },
+                        };
+                        return;
+                    }
+                }
+                self.say("Move cancelled.");
+            }
+            Op::DoMoveGame { app, dest } => {
+                let title = self.title_of(&app);
+                let guard = match process::SuspendGuard::suspend() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        self.say(format!("terminal suspend failed: {e}"));
+                        return;
+                    }
+                };
+                let _ = std::fs::create_dir_all(&dest);
+                let ok = process::run_foreground(&["legendary", "-y", "move", &app, &dest]);
+                guard.disarm();
+                self.suspended = true;
+                if ok {
+                    if let Some(game_cfg) = self.cfg.games.get_mut(&app) {
+                        if game_cfg.install_path.is_some() {
+                            let mut new_path = std::path::PathBuf::from(&dest);
+                            if let Some(g) = self.games.iter().find(|g| g.app_name == app) {
+                                if let Some(old_p) = &g.install_path {
+                                    if let Some(folder_name) =
+                                        std::path::Path::new(old_p).file_name()
+                                    {
+                                        new_path.push(folder_name);
+                                    }
+                                }
+                            }
+                            game_cfg.install_path = Some(new_path.to_string_lossy().into_owned());
+                            let _ = config::save(&self.cfg);
+                        }
+                    }
+                    let _ = self.refresh_installed();
+                    self.say(format!("{title} moved successfully to {dest}."));
+                } else {
+                    self.say(format!("Move of {title} failed or was cancelled."));
+                }
+            }
             Op::DeleteGame(app) => {
                 let title = self.title_of(&app);
                 let guard = match process::SuspendGuard::suspend() {
@@ -1075,8 +1156,8 @@ impl App {
                 Op::SetPerGamePrefix(app.to_string()),
             ),
             (
-                format!("Install Location:   {install_path_label}"),
-                Op::SetPerGamePath(app.to_string()),
+                format!("Move Game Location: {install_path_label}"),
+                Op::MoveGame(app.to_string()),
             ),
             (
                 "Update / Verify Installation".to_string(),
@@ -1109,9 +1190,9 @@ impl App {
     }
 
     fn settings_menu(&self) -> Menu {
-        let sel_app = self
+        let (sel_app, sel_title, is_installed) = self
             .current()
-            .map(|g| g.app_name.clone())
+            .map(|g| (g.app_name.clone(), g.title.clone(), g.installed))
             .unwrap_or_default();
         Menu {
             title: "Global Settings".to_string(),
@@ -1158,8 +1239,18 @@ impl App {
                     Op::SetLsfg,
                 ),
                 (
-                    "Set per-game install location (selected game)".to_string(),
-                    Op::SetPerGamePath(sel_app),
+                    if is_installed {
+                        format!("Move game location ({sel_title})")
+                    } else if !sel_app.is_empty() {
+                        format!("Set per-game install location ({sel_title})")
+                    } else {
+                        "Set per-game install location".to_string()
+                    },
+                    if is_installed {
+                        Op::MoveGame(sel_app)
+                    } else {
+                        Op::SetPerGamePath(sel_app)
+                    },
                 ),
                 ("Clean stale Alt+G entries".to_string(), Op::CleanStale),
             ],
@@ -1713,6 +1804,10 @@ impl App {
                     op: Op::SetPrefixPath,
                 };
             }
+            Op::MoveGame(app) => {
+                self.mode = Mode::Library;
+                self.execute(Op::MoveGame(app));
+            }
             Op::SetPerGamePath(app) => {
                 if app.is_empty() {
                     self.say("Select a game first.");
@@ -1892,6 +1987,31 @@ impl App {
                             self.say("Dedicated prefix root saved.");
                         }
                         self.mode = Mode::Library;
+                    }
+                    Op::MoveGame(app) => {
+                        let dest = value.trim().to_string();
+                        if dest.is_empty() {
+                            self.say("Move destination cannot be empty.");
+                            self.mode = Mode::Library;
+                        } else {
+                            let title = self.title_of(&app);
+                            let cur_path = self
+                                .games
+                                .iter()
+                                .find(|g| g.app_name == app)
+                                .and_then(|g| g.install_path.clone())
+                                .unwrap_or_else(|| "Unknown".into());
+                            self.mode = Mode::Confirm {
+                                lines: vec![
+                                    format!("Move {title}?"),
+                                    format!("Current path:     {cur_path}"),
+                                    format!("Destination base: {dest}"),
+                                    "".into(),
+                                    "Legendary will move game files and update database.".into(),
+                                ],
+                                op: Op::DoMoveGame { app, dest },
+                            };
+                        }
                     }
                     Op::SetPerGamePath(app) => {
                         if value.is_empty() {
@@ -2406,5 +2526,32 @@ mod tests {
             app.cfg.games.get("app2").and_then(|g| g.lsfg.as_deref()),
             Some("4x")
         );
+    }
+
+    #[test]
+    fn move_game_menu_option() {
+        let mut app = test_app();
+        app.selected = 1; // Beta (installed)
+
+        // Settings menu shows "Move game location (Game Beta)"
+        let settings = app.settings_menu();
+        assert!(settings.items.iter().any(|(lbl, op)| {
+            lbl.contains("Move game location (Game Beta)")
+                && matches!(op, Op::MoveGame(id) if id == "app2")
+        }));
+
+        // Installed menu shows "Move Game Location: ..."
+        let inst_menu = app.installed_menu("app2");
+        assert!(inst_menu.items.iter().any(|(lbl, op)| {
+            lbl.contains("Move Game Location:") && matches!(op, Op::MoveGame(id) if id == "app2")
+        }));
+
+        // When uninstalled game is selected (Alpha, index 3), settings menu shows "Set per-game install location"
+        app.selected = 3;
+        let settings_uninstalled = app.settings_menu();
+        assert!(settings_uninstalled.items.iter().any(|(lbl, op)| {
+            lbl.contains("Set per-game install location (Game Alpha)")
+                && matches!(op, Op::SetPerGamePath(id) if id == "app1")
+        }));
     }
 }
