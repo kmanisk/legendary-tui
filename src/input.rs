@@ -10,6 +10,8 @@ pub enum Intent {
     PageUp,
     First,
     Last,
+    DetailScrollDown,
+    DetailScrollUp,
     FilterCycle,
     ToggleSelect,
     Enter,

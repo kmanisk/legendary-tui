@@ -38,6 +38,12 @@ pub(crate) enum Op {
     Back,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum RowItem {
+    Header(&'static str, usize),
+    Game(usize),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum MenuKind {
     Installed(String),
@@ -68,9 +74,10 @@ pub(crate) enum Mode {
 
 pub struct App {
     pub(crate) games: Vec<Game>,
-    /// Indices into `games` after search filter + ranking.
-    pub(crate) filtered: Vec<usize>,
+    /// Categorized rows (headers and game indices).
+    pub(crate) filtered: Vec<RowItem>,
     pub selected: usize,
+    pub detail_scroll: u16,
     pub search: String,
     pub searching: bool,
     mode: Mode,
@@ -131,6 +138,7 @@ impl App {
             games: Vec::new(),
             filtered: Vec::new(),
             selected: 0,
+            detail_scroll: 0,
             search: String::new(),
             searching: false,
             mode: Mode::Library,
@@ -204,11 +212,10 @@ impl App {
         self.rofi_entries = rofi::entries();
         self.apply_filter();
         if let Some(id) = sel_id {
-            if let Some(pos) = self
-                .filtered
-                .iter()
-                .position(|&i| self.games[i].app_name == id)
-            {
+            if let Some(pos) = self.filtered.iter().position(|r| match r {
+                RowItem::Game(i) => self.games[*i].app_name == id,
+                _ => false,
+            }) {
                 self.selected = pos;
             }
         }
@@ -320,17 +327,86 @@ impl App {
                     .then_with(|| self.games[a.1].title.cmp(&self.games[b.1].title))
             });
         }
-        self.filtered = scored.into_iter().map(|(_, i)| i).collect();
-        self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
+
+        let mut installed_rows = Vec::new();
+        let mut library_rows = Vec::new();
+
+        for (_, idx) in scored {
+            if self.games[idx].installed {
+                installed_rows.push(idx);
+            } else {
+                library_rows.push(idx);
+            }
+        }
+
+        let mut rows = Vec::new();
+        if !installed_rows.is_empty() {
+            rows.push(RowItem::Header("Installed Games", installed_rows.len()));
+            for idx in installed_rows {
+                rows.push(RowItem::Game(idx));
+            }
+        }
+        if !library_rows.is_empty() {
+            rows.push(RowItem::Header("Library", library_rows.len()));
+            for idx in library_rows {
+                rows.push(RowItem::Game(idx));
+            }
+        }
+
+        self.filtered = rows;
+        self.ensure_valid_selection(self.selected);
+        self.detail_scroll = 0;
+    }
+
+    fn ensure_valid_selection(&mut self, preferred: usize) {
+        if self.filtered.is_empty() {
+            self.selected = 0;
+            return;
+        }
+        if let Some(RowItem::Game(_)) = self.filtered.get(preferred) {
+            self.selected = preferred;
+            return;
+        }
+        for idx in preferred..self.filtered.len() {
+            if let RowItem::Game(_) = self.filtered[idx] {
+                self.selected = idx;
+                return;
+            }
+        }
+        for idx in (0..preferred).rev() {
+            if let RowItem::Game(_) = self.filtered[idx] {
+                self.selected = idx;
+                return;
+            }
+        }
+        self.selected = 0;
     }
 
     fn jump_first(&mut self) {
-        self.selected = 0;
+        if let Some(pos) = self
+            .filtered
+            .iter()
+            .position(|r| matches!(r, RowItem::Game(_)))
+        {
+            self.selected = pos;
+        } else {
+            self.selected = 0;
+        }
+        self.detail_scroll = 0;
         self.update_selected_details();
     }
 
     fn jump_last(&mut self) {
-        self.selected = self.filtered.len().saturating_sub(1);
+        if let Some(pos) = self
+            .filtered
+            .iter()
+            .rposition(|r| matches!(r, RowItem::Game(_)))
+        {
+            self.selected = pos;
+        } else {
+            self.selected = 0;
+        }
+        self.detail_scroll = 0;
         self.update_selected_details();
     }
 
@@ -380,7 +456,10 @@ impl App {
     }
 
     pub fn current(&self) -> Option<&Game> {
-        self.filtered.get(self.selected).map(|&i| &self.games[i])
+        match self.filtered.get(self.selected) {
+            Some(RowItem::Game(i)) => self.games.get(*i),
+            _ => None,
+        }
     }
 
     pub fn current_details(&self) -> Option<&GameDetails> {
@@ -1424,6 +1503,12 @@ impl App {
             Intent::ConfirmNo => {
                 self.mode = Mode::Library;
             }
+            Intent::DetailScrollDown => {
+                self.detail_scroll = self.detail_scroll.saturating_add(2);
+            }
+            Intent::DetailScrollUp => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(2);
+            }
             Intent::Char(_) | Intent::Backspace => {}
         }
     }
@@ -1432,8 +1517,34 @@ impl App {
         if self.filtered.is_empty() {
             return;
         }
-        let n = self.filtered.len() as isize;
-        self.selected = (self.selected as isize + delta).rem_euclid(n) as usize;
+        let total = self.filtered.len();
+        let step = if delta >= 0 { 1 } else { -1 };
+        let count = delta.abs();
+        let mut curr = self.selected;
+
+        for _ in 0..count {
+            let mut next = curr;
+            let mut found = false;
+            for _ in 0..total {
+                next = if step > 0 {
+                    (next + 1) % total
+                } else if next == 0 {
+                    total - 1
+                } else {
+                    next - 1
+                };
+                if let RowItem::Game(_) = self.filtered[next] {
+                    curr = next;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                break;
+            }
+        }
+        self.selected = curr;
+        self.detail_scroll = 0;
         self.update_selected_details();
     }
 
@@ -1903,8 +2014,8 @@ impl App {
         }
     }
 
-    pub fn visible_games(&self) -> Vec<&Game> {
-        self.filtered.iter().map(|&i| &self.games[i]).collect()
+    pub fn filtered_rows(&self) -> &[RowItem] {
+        &self.filtered
     }
 
     pub fn detail_for(&self, app: &str) -> Vec<(String, String)> {
@@ -2050,8 +2161,9 @@ mod tests {
                     install_path: None,
                 },
             ],
-            filtered: vec![0, 1, 2],
+            filtered: Vec::new(),
             selected: 0,
+            detail_scroll: 0,
             search: String::new(),
             searching: false,
             mode: Mode::Library,
@@ -2070,6 +2182,7 @@ mod tests {
             selected_games: HashSet::new(),
             install_queue: Vec::new(),
         };
+        app.apply_filter();
         app.update_selected_details();
         app
     }
@@ -2077,39 +2190,51 @@ mod tests {
     #[test]
     fn navigation_and_bounds() {
         let mut app = test_app();
-        assert_eq!(app.selected, 0);
-
-        app.handle(Intent::Down);
+        // Index 0: Header("Installed Games", 1)
+        // Index 1: Game(Beta)
+        // Index 2: Header("Library", 2)
+        // Index 3: Game(Alpha)
+        // Index 4: Game(Gamma)
         assert_eq!(app.selected, 1);
+        assert_eq!(app.current().unwrap().app_name, "app2");
 
-        app.handle(Intent::Down);
-        assert_eq!(app.selected, 2);
+        app.handle(Intent::Down); // skips header at index 2, lands on index 3
+        assert_eq!(app.selected, 3);
+        assert_eq!(app.current().unwrap().app_name, "app1");
 
-        app.handle(Intent::Down); // wrap around
-        assert_eq!(app.selected, 0);
+        app.handle(Intent::Down); // lands on index 4
+        assert_eq!(app.selected, 4);
+        assert_eq!(app.current().unwrap().app_name, "app3");
 
-        app.handle(Intent::Up); // wrap around
-        assert_eq!(app.selected, 2);
+        app.handle(Intent::Down); // wrap around, skips header 0, lands on 1
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.current().unwrap().app_name, "app2");
 
-        app.handle(Intent::Last);
-        assert_eq!(app.selected, 2);
+        app.handle(Intent::Up); // wrap around to index 4
+        assert_eq!(app.selected, 4);
+        assert_eq!(app.current().unwrap().app_name, "app3");
 
         app.handle(Intent::First);
-        assert_eq!(app.selected, 0);
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.current().unwrap().app_name, "app2");
+
+        app.handle(Intent::Last);
+        assert_eq!(app.selected, 4);
+        assert_eq!(app.current().unwrap().app_name, "app3");
     }
 
     #[test]
     fn deterministic_gg() {
         let mut app = test_app();
-        app.selected = 2;
+        app.selected = 4;
 
         // First 'g' arms pending_g
         app.handle(Intent::First);
         assert!(app.pending_g);
-        assert_eq!(app.selected, 0);
+        assert_eq!(app.selected, 1);
 
         // Another key resets pending_g
-        app.selected = 2;
+        app.selected = 4;
         app.handle(Intent::Down);
         assert!(!app.pending_g);
 
@@ -2118,50 +2243,53 @@ mod tests {
         assert!(app.pending_g);
         app.handle(Intent::First);
         assert!(!app.pending_g);
-        assert_eq!(app.selected, 0);
+        assert_eq!(app.selected, 1);
     }
 
     #[test]
     fn filter_cycling() {
         let mut app = test_app();
         assert_eq!(app.filter, Filter::All);
-        assert_eq!(app.filtered.len(), 3);
+        assert_eq!(app.filtered.len(), 5);
 
         app.handle(Intent::FilterCycle);
         assert_eq!(app.filter, Filter::Installed);
-        assert_eq!(app.filtered.len(), 1);
-        assert_eq!(app.games[app.filtered[0]].app_name, "app2");
+        assert_eq!(app.filtered.len(), 2);
+        assert_eq!(app.current().unwrap().app_name, "app2");
 
         app.handle(Intent::FilterCycle);
         assert_eq!(app.filter, Filter::Available);
-        assert_eq!(app.filtered.len(), 2);
+        assert_eq!(app.filtered.len(), 3);
+        assert_eq!(app.current().unwrap().app_name, "app1");
 
         app.handle(Intent::FilterCycle);
         assert_eq!(app.filter, Filter::All);
-        assert_eq!(app.filtered.len(), 3);
+        assert_eq!(app.filtered.len(), 5);
     }
 
     #[test]
     fn toggle_select_flow() {
         let mut app = test_app();
         assert!(app.selected_games.is_empty());
-        assert_eq!(app.selected, 0);
+        app.selected = 3; // Alpha (uninstalled)
+        assert_eq!(app.current().unwrap().app_name, "app1");
 
-        // Pressing Tab toggles selection on game 0 (Alpha, uninstalled)
+        // Pressing Tab toggles selection on game 3 (Alpha) and advances to 4 (Gamma)
         app.handle(Intent::ToggleSelect);
         assert_eq!(app.selected_games.len(), 1);
-        assert!(app
-            .selected_games
-            .contains(&app.games[app.filtered[0]].app_name));
-        assert_eq!(app.selected, 1);
+        assert!(app.selected_games.contains("app1"));
+        assert_eq!(app.selected, 4);
+        assert_eq!(app.current().unwrap().app_name, "app3");
 
-        // Pressing Tab on game 1 (Beta, installed) is blocked by guardrail!
+        // Move to Beta (installed, index 1)
+        app.selected = 1;
+        // Pressing Tab on Beta (installed) while Alpha (uninstalled) is selected is blocked by guardrail!
         app.handle(Intent::ToggleSelect);
         assert_eq!(app.selected_games.len(), 1);
         assert!(app.status.contains("Cannot mix"));
 
-        // Move to game 2 (Gamma, uninstalled) and press Tab -> succeeds!
-        app.selected = 2;
+        // Move to game 4 (Gamma, uninstalled) and press Tab -> succeeds!
+        app.selected = 4;
         app.handle(Intent::ToggleSelect);
         assert_eq!(app.selected_games.len(), 2);
 
@@ -2178,7 +2306,7 @@ mod tests {
         assert_eq!(app2.selected_games.len(), 1);
 
         // Attempting to select Alpha (uninstalled) while Beta (installed) is selected is blocked
-        app2.selected = 0;
+        app2.selected = 3;
         app2.handle(Intent::ToggleSelect);
         assert_eq!(app2.selected_games.len(), 1);
         assert!(app2.status.contains("Cannot mix"));
@@ -2190,6 +2318,25 @@ mod tests {
         // Cancel (Esc) clears selections
         app2.handle(Intent::Cancel);
         assert!(matches!(app2.mode, Mode::Library));
+    }
+
+    #[test]
+    fn detail_scrolling() {
+        let mut app = test_app();
+        assert_eq!(app.detail_scroll, 0);
+
+        app.handle(Intent::DetailScrollDown);
+        assert_eq!(app.detail_scroll, 2);
+
+        app.handle(Intent::DetailScrollDown);
+        assert_eq!(app.detail_scroll, 4);
+
+        app.handle(Intent::DetailScrollUp);
+        assert_eq!(app.detail_scroll, 2);
+
+        // Moving to another game resets detail_scroll
+        app.handle(Intent::Down);
+        assert_eq!(app.detail_scroll, 0);
     }
 
     #[test]

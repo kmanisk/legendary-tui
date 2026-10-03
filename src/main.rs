@@ -86,7 +86,16 @@ fn to_intent(key: crossterm::event::KeyEvent, searching: bool, in_input: bool) -
             _ => None,
         };
     }
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        match key.code {
+            KeyCode::Char('j' | 'J') => return Some(Intent::DetailScrollDown),
+            KeyCode::Char('k' | 'K') => return Some(Intent::DetailScrollUp),
+            _ => {}
+        }
+    }
     match key.code {
+        KeyCode::Char('J') => Some(Intent::DetailScrollDown),
+        KeyCode::Char('K') => Some(Intent::DetailScrollUp),
         KeyCode::Char('j') | KeyCode::Down => Some(Intent::Down),
         KeyCode::Char('k') | KeyCode::Up => Some(Intent::Up),
         KeyCode::Char('h') | KeyCode::Left => Some(Intent::Left),
