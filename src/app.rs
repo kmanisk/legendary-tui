@@ -99,7 +99,11 @@ pub struct App {
     pub(crate) selected_details: Option<GameDetails>,
     pub(crate) selected_games: HashSet<String>,
     pub(crate) install_queue: Vec<String>,
+    pub(crate) refreshing: bool,
+    pub(crate) refresh_rx: Option<std::sync::mpsc::Receiver<LibraryResult>>,
 }
+
+type LibraryResult = Result<Vec<(String, String)>, String>;
 
 /// Library filter, cycled with `f`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -158,6 +162,8 @@ impl App {
             selected_details: None,
             selected_games: HashSet::new(),
             install_queue: Vec::new(),
+            refreshing: false,
+            refresh_rx: None,
         };
         app.set_library(lib);
         app.refresh_installed()?;
@@ -270,6 +276,38 @@ impl App {
                 }
             }
         }
+
+        // 3. Poll background library refresh
+        if let Some(rx) = &self.refresh_rx {
+            if let Ok(res) = rx.try_recv() {
+                self.refreshing = false;
+                self.refresh_rx = None;
+                match res {
+                    Ok(lib) => {
+                        let cached: Vec<cache::CachedGame> = lib
+                            .iter()
+                            .map(|(id, title)| cache::CachedGame {
+                                app_name: id.clone(),
+                                title: title.clone(),
+                            })
+                            .collect();
+                        let _ = cache::save(&cached);
+                        self.set_library(lib);
+                        self.theme = crate::theme::load();
+                        if let Err(e) = self.refresh_installed() {
+                            self.say(format!("installed refresh failed: {e}"));
+                        } else {
+                            self.say("Library refreshed.");
+                        }
+                    }
+                    Err(e) => {
+                        self.say(format!("refresh failed (kept cache): {e}"));
+                    }
+                }
+                updated = true;
+            }
+        }
+
         updated
     }
 
@@ -365,18 +403,21 @@ impl App {
             self.selected = 0;
             return;
         }
+        let max_idx = self.filtered.len().saturating_sub(1);
+        let preferred = preferred.min(max_idx);
+
         if let Some(RowItem::Game(_)) = self.filtered.get(preferred) {
             self.selected = preferred;
             return;
         }
         for idx in preferred..self.filtered.len() {
-            if let RowItem::Game(_) = self.filtered[idx] {
+            if matches!(self.filtered.get(idx), Some(RowItem::Game(_))) {
                 self.selected = idx;
                 return;
             }
         }
         for idx in (0..preferred).rev() {
-            if let RowItem::Game(_) = self.filtered[idx] {
+            if matches!(self.filtered.get(idx), Some(RowItem::Game(_))) {
                 self.selected = idx;
                 return;
             }
@@ -654,21 +695,33 @@ impl App {
             }
         };
 
-        let guard = match process::SuspendGuard::suspend() {
-            Ok(g) => g,
+        let log_path = format!("/tmp/egs-launch-{app_name}.log");
+        let log_file = match std::fs::File::create(&log_path) {
+            Ok(f) => f,
             Err(e) => {
-                self.say(format!("Terminal suspend failed: {e}"));
+                self.say(format!("Failed to create launch log: {e}"));
+                return;
+            }
+        };
+        let log_file_err = match log_file.try_clone() {
+            Ok(f) => f,
+            Err(e) => {
+                self.say(format!("Failed to clone log file handle: {e}"));
                 return;
             }
         };
 
-        let ok = cmd.status().map(|s| s.success()).unwrap_or(false);
-        guard.disarm();
-        self.suspended = true;
-        if ok {
-            self.say(format!("{title} exited. Back in library."));
-        } else {
-            self.say(format!("{title} launch failed or exited with error."));
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(log_file_err));
+
+        match cmd.spawn() {
+            Ok(_child) => {
+                self.say(format!("Launched {title} in background. Log: {log_path}"));
+            }
+            Err(e) => {
+                self.say(format!("Failed to spawn {title}: {e}"));
+            }
         }
     }
 
@@ -1557,18 +1610,20 @@ impl App {
             Intent::Search => {
                 self.searching = true;
             }
-            Intent::Refresh => match Self::fetch_library() {
-                Ok(lib) => {
-                    self.set_library(lib);
-                    self.theme = crate::theme::load();
-                    if let Err(e) = self.refresh_installed() {
-                        self.say(format!("installed refresh failed: {e}"));
-                    } else {
-                        self.say("Library refreshed.");
-                    }
+            Intent::Refresh => {
+                if self.refreshing {
+                    self.say("Library refresh already in progress...");
+                } else {
+                    self.refreshing = true;
+                    self.say("Refreshing library in background...");
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    self.refresh_rx = Some(rx);
+                    std::thread::spawn(move || {
+                        let res = crate::legendary::library();
+                        let _ = tx.send(res);
+                    });
                 }
-                Err(e) => self.say(format!("refresh failed (kept cache): {e}")),
-            },
+            }
             Intent::Settings => {
                 self.mode = Mode::Menu(self.settings_menu());
             }
@@ -2301,10 +2356,25 @@ mod tests {
             selected_details: None,
             selected_games: HashSet::new(),
             install_queue: Vec::new(),
+            refreshing: false,
+            refresh_rx: None,
         };
         app.apply_filter();
         app.update_selected_details();
         app
+    }
+
+    #[test]
+    fn ensure_valid_selection_out_of_bounds_resilience() {
+        let mut app = test_app();
+        // With 5 items total, calling ensure_valid_selection with 99 must not panic
+        app.ensure_valid_selection(99);
+        assert!(app.selected < app.filtered.len());
+
+        // Even with an empty list, ensure_valid_selection must not panic
+        app.filtered.clear();
+        app.ensure_valid_selection(99);
+        assert_eq!(app.selected, 0);
     }
 
     #[test]

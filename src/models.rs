@@ -55,6 +55,8 @@ pub struct GameDetails {
     pub grant_date: Option<String>,
     #[serde(default)]
     pub manifest_cached: bool,
+    #[serde(default)]
+    pub protondb_tier: Option<String>,
 }
 
 /// Relevance score for search ranking: exact > prefix > substring > fuzzy.

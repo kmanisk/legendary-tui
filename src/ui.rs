@@ -292,6 +292,32 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, rows[1], &mut state);
 }
 
+fn protondb_badge<'a>(tier: Option<&str>, theme: &'a crate::theme::Theme) -> (Span<'a>, Span<'a>) {
+    let label = Span::styled("ProtonDB:     ", Style::default().fg(theme.cyan));
+    let val = match tier {
+        Some(t) => {
+            let style = match t.to_lowercase().as_str() {
+                "platinum" => Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD),
+                "gold" => Style::default()
+                    .fg(theme.yellow)
+                    .add_modifier(Modifier::BOLD),
+                "silver" => Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+                "bronze" => Style::default()
+                    .fg(Color::Rgb(205, 127, 50))
+                    .add_modifier(Modifier::BOLD),
+                "borked" => Style::default().fg(theme.red).add_modifier(Modifier::BOLD),
+                "native" => Style::default()
+                    .fg(theme.green)
+                    .add_modifier(Modifier::BOLD),
+                _ => Style::default().fg(theme.fg),
+            };
+            Span::styled(t.to_string(), style)
+        }
+        None => Span::styled("Checking...", Style::default().fg(theme.muted)),
+    };
+    (label, val)
+}
+
 fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
     let mut lines = Vec::new();
     match app.current() {
@@ -308,7 +334,7 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from(""));
 
             if g.installed {
-                // Installed State
+                // State: Installed
                 lines.push(Line::from(vec![
                     Span::styled("State:        ", Style::default().fg(app.theme.cyan)),
                     Span::styled(
@@ -318,159 +344,39 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                             .add_modifier(Modifier::BOLD),
                     ),
                 ]));
-            }
 
-            // App ID
-            lines.push(Line::from(vec![
-                Span::styled("App ID:       ", Style::default().fg(app.theme.cyan)),
-                Span::styled(&g.app_name, Style::default().fg(app.theme.fg)),
-            ]));
-
-            // Version & Build ID
-            if g.installed {
+                // Clean Version (without noisy hash)
                 let ver = g
                     .version
                     .as_deref()
                     .or_else(|| details.and_then(|d| d.version.as_deref()))
                     .unwrap_or("N/A");
-                let mut ver_str = ver.to_string();
-                if let Some(bid) = details.and_then(|d| d.build_id.as_deref()) {
-                    ver_str.push_str(&format!(" (Build: {bid})"));
-                }
                 lines.push(Line::from(vec![
                     Span::styled("Version:      ", Style::default().fg(app.theme.cyan)),
-                    Span::styled(ver_str, Style::default().fg(app.theme.fg)),
+                    Span::styled(ver, Style::default().fg(app.theme.fg)),
                 ]));
-            }
 
-            // Platform
-            if let Some(plt) = details.and_then(|d| d.platform.as_deref()) {
-                lines.push(Line::from(vec![
-                    Span::styled("Platform:     ", Style::default().fg(app.theme.cyan)),
-                    Span::styled(plt, Style::default().fg(app.theme.fg)),
-                ]));
-            }
+                // ProtonDB Rating
+                let (pdb_lbl, pdb_val) =
+                    protondb_badge(details.and_then(|d| d.protondb_tier.as_deref()), &app.theme);
+                lines.push(Line::from(vec![pdb_lbl, pdb_val]));
 
-            // Sizes
-            if let Some(d) = details {
-                if let Some(dl) = d.download_size {
-                    lines.push(Line::from(vec![
-                        Span::styled("Download:     ", Style::default().fg(app.theme.cyan)),
-                        Span::styled(prefix::fmt_size(dl), Style::default().fg(app.theme.yellow)),
-                    ]));
-                } else if !g.installed {
-                    lines.push(Line::from(vec![
-                        Span::styled("Download:     ", Style::default().fg(app.theme.cyan)),
-                        Span::styled(
-                            "Fetching game information...",
-                            Style::default().fg(app.theme.muted),
-                        ),
-                    ]));
-                }
-
-                if let Some(inst) = d.installed_size {
+                // Installed Size
+                if let Some(inst) = details.and_then(|d| d.installed_size) {
                     lines.push(Line::from(vec![
                         Span::styled("Installed:    ", Style::default().fg(app.theme.cyan)),
                         Span::styled(prefix::fmt_size(inst), Style::default().fg(app.theme.fg)),
                     ]));
                 }
 
-                // Launch Exe (only show when installed!)
-                if g.installed {
-                    if let Some(exe) = &d.launch_exe {
-                        lines.push(Line::from(vec![
-                            Span::styled("Executable:   ", Style::default().fg(app.theme.cyan)),
-                            Span::styled(exe, Style::default().fg(app.theme.fg)),
-                        ]));
-                    }
-                }
-
-                // Cloud Saves
-                if let Some(cs) = d.cloud_saves {
-                    let cs_text = if cs {
-                        match &d.cloud_save_folder {
-                            Some(f) => format!("Supported ({f})"),
-                            None => "Supported".into(),
-                        }
-                    } else {
-                        "Not supported".into()
-                    };
+                // Executable
+                if let Some(exe) = details.and_then(|d| d.launch_exe.as_deref()) {
                     lines.push(Line::from(vec![
-                        Span::styled("Cloud Saves:  ", Style::default().fg(app.theme.cyan)),
-                        Span::styled(
-                            cs_text,
-                            Style::default().fg(if cs { app.theme.green } else { app.theme.muted }),
-                        ),
+                        Span::styled("Executable:   ", Style::default().fg(app.theme.cyan)),
+                        Span::styled(exe, Style::default().fg(app.theme.fg)),
                     ]));
                 }
 
-                // Prerequisites / Anti-Cheat
-                if !d.prerequisites.is_empty() {
-                    lines.push(Line::from(vec![
-                        Span::styled("Prereqs:      ", Style::default().fg(app.theme.cyan)),
-                        Span::styled(
-                            d.prerequisites.join(", "),
-                            Style::default().fg(app.theme.fg),
-                        ),
-                    ]));
-                }
-
-                // DLCs
-                if !d.installed_dlc.is_empty() {
-                    lines.push(Line::from(vec![
-                        Span::styled("DLCs (inst):  ", Style::default().fg(app.theme.cyan)),
-                        Span::styled(
-                            d.installed_dlc.join(", "),
-                            Style::default().fg(app.theme.fg),
-                        ),
-                    ]));
-                } else if !d.owned_dlc.is_empty() {
-                    lines.push(Line::from(vec![
-                        Span::styled("DLCs (owned): ", Style::default().fg(app.theme.cyan)),
-                        Span::styled(
-                            format!("{} owned", d.owned_dlc.len()),
-                            Style::default().fg(app.theme.fg),
-                        ),
-                    ]));
-                }
-            }
-
-            // Developer & Publisher
-            if let Some(dev) = details.and_then(|d| d.developer.as_deref()) {
-                lines.push(Line::from(vec![
-                    Span::styled("Developer:    ", Style::default().fg(app.theme.cyan)),
-                    Span::styled(dev, Style::default().fg(app.theme.fg)),
-                ]));
-            }
-            if let Some(publ) = details.and_then(|d| d.publisher.as_deref()) {
-                lines.push(Line::from(vec![
-                    Span::styled("Publisher:    ", Style::default().fg(app.theme.cyan)),
-                    Span::styled(publ, Style::default().fg(app.theme.fg)),
-                ]));
-            }
-
-            // Release Date
-            if let Some(date) =
-                details.and_then(|d| d.release_date.as_deref().or(d.grant_date.as_deref()))
-            {
-                lines.push(Line::from(vec![
-                    Span::styled("Release:      ", Style::default().fg(app.theme.cyan)),
-                    Span::styled(date, Style::default().fg(app.theme.fg)),
-                ]));
-            }
-
-            // Genres
-            if let Some(genres) = details.map(|d| &d.genres) {
-                if !genres.is_empty() {
-                    lines.push(Line::from(vec![
-                        Span::styled("Genre:        ", Style::default().fg(app.theme.cyan)),
-                        Span::styled(genres.join(" / "), Style::default().fg(app.theme.fg)),
-                    ]));
-                }
-            }
-
-            // Launch configuration (ONLY for installed games!)
-            if g.installed {
                 // Proton
                 let proton = app
                     .cfg
@@ -501,28 +407,30 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                     Span::styled(pfx, Style::default().fg(app.theme.fg)),
                 ]));
 
-                // Launch Options
-                if let Some(args) = app
-                    .cfg
-                    .games
-                    .get(&g.app_name)
-                    .and_then(|c| c.launch_args.as_deref())
-                {
-                    lines.push(Line::from(vec![
-                        Span::styled("Launch Args:  ", Style::default().fg(app.theme.cyan)),
-                        Span::styled(args, Style::default().fg(app.theme.fg)),
-                    ]));
-                }
-
-                // GameMode
+                // Compact Flags row: GameMode [On]  MangoHud [Yes]  LSFG [Disabled]
                 let gamemode = app
                     .cfg
                     .games
                     .get(&g.app_name)
                     .and_then(|c| c.gamemode)
                     .unwrap_or(app.cfg.default_gamemode);
+                let mangohud = app
+                    .cfg
+                    .games
+                    .get(&g.app_name)
+                    .and_then(|c| c.mangohud)
+                    .unwrap_or(app.cfg.default_mangohud);
+                let lsfg = app
+                    .cfg
+                    .games
+                    .get(&g.app_name)
+                    .and_then(|c| c.lsfg.clone())
+                    .unwrap_or_else(|| app.cfg.lsfg_multiplier.clone());
+
+                let is_lsfg_enabled = lsfg != "Disabled";
                 lines.push(Line::from(vec![
-                    Span::styled("GameMode:     ", Style::default().fg(app.theme.cyan)),
+                    Span::styled("Flags:        ", Style::default().fg(app.theme.cyan)),
+                    Span::styled("GameMode [", Style::default().fg(app.theme.muted)),
                     Span::styled(
                         if gamemode { "On" } else { "Off" },
                         Style::default().fg(if gamemode {
@@ -531,17 +439,7 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                             app.theme.muted
                         }),
                     ),
-                ]));
-
-                // MangoHud
-                let mangohud = app
-                    .cfg
-                    .games
-                    .get(&g.app_name)
-                    .and_then(|c| c.mangohud)
-                    .unwrap_or(app.cfg.default_mangohud);
-                lines.push(Line::from(vec![
-                    Span::styled("MangoHud:     ", Style::default().fg(app.theme.cyan)),
+                    Span::styled("]  MangoHud [", Style::default().fg(app.theme.muted)),
                     Span::styled(
                         if mangohud { "Yes" } else { "No" },
                         Style::default().fg(if mangohud {
@@ -550,32 +448,142 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                             app.theme.muted
                         }),
                     ),
-                ]));
-
-                // LSFG Frame Gen
-                let lsfg = app
-                    .cfg
-                    .games
-                    .get(&g.app_name)
-                    .and_then(|c| c.lsfg.clone())
-                    .unwrap_or_else(|| app.cfg.lsfg_multiplier.clone());
-                lines.push(Line::from(vec![
-                    Span::styled("LSFG Frame:   ", Style::default().fg(app.theme.cyan)),
+                    Span::styled("]  LSFG [", Style::default().fg(app.theme.muted)),
                     Span::styled(
-                        lsfg.clone(),
-                        Style::default().fg(if lsfg != "Disabled" {
+                        lsfg,
+                        Style::default().fg(if is_lsfg_enabled {
                             app.theme.accent
                         } else {
                             app.theme.muted
                         }),
                     ),
+                    Span::styled("]", Style::default().fg(app.theme.muted)),
                 ]));
 
-                // Install Location
-                if let Some(p) = &g.install_path {
+                // Prerequisites / Anti-Cheat
+                if let Some(d) = details {
+                    if !d.prerequisites.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled("Prereqs:      ", Style::default().fg(app.theme.cyan)),
+                            Span::styled(
+                                d.prerequisites.join(", "),
+                                Style::default().fg(app.theme.fg),
+                            ),
+                        ]));
+                    }
+                    if let Some(cs) = d.cloud_saves {
+                        let cs_text = if cs {
+                            match &d.cloud_save_folder {
+                                Some(f) => format!("Supported ({f})"),
+                                None => "Supported".into(),
+                            }
+                        } else {
+                            "Not supported".into()
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled("Cloud Saves:  ", Style::default().fg(app.theme.cyan)),
+                            Span::styled(
+                                cs_text,
+                                Style::default().fg(if cs {
+                                    app.theme.green
+                                } else {
+                                    app.theme.muted
+                                }),
+                            ),
+                        ]));
+                    }
+                    if !d.installed_dlc.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled("DLCs (inst):  ", Style::default().fg(app.theme.cyan)),
+                            Span::styled(
+                                d.installed_dlc.join(", "),
+                                Style::default().fg(app.theme.fg),
+                            ),
+                        ]));
+                    }
+                }
+            } else {
+                // UNINSTALLED GAME VIEW:
+                // ProtonDB Rating
+                let (pdb_lbl, pdb_val) =
+                    protondb_badge(details.and_then(|d| d.protondb_tier.as_deref()), &app.theme);
+                lines.push(Line::from(vec![pdb_lbl, pdb_val]));
+
+                if let Some(d) = details {
+                    if let Some(dl) = d.download_size {
+                        lines.push(Line::from(vec![
+                            Span::styled("Download:     ", Style::default().fg(app.theme.cyan)),
+                            Span::styled(
+                                prefix::fmt_size(dl),
+                                Style::default().fg(app.theme.yellow),
+                            ),
+                        ]));
+                    } else {
+                        lines.push(Line::from(vec![
+                            Span::styled("Download:     ", Style::default().fg(app.theme.cyan)),
+                            Span::styled(
+                                "Fetching game information...",
+                                Style::default().fg(app.theme.muted),
+                            ),
+                        ]));
+                    }
+
+                    if let Some(cs) = d.cloud_saves {
+                        let cs_text = if cs { "Supported" } else { "Not supported" };
+                        lines.push(Line::from(vec![
+                            Span::styled("Cloud Saves:  ", Style::default().fg(app.theme.cyan)),
+                            Span::styled(
+                                cs_text,
+                                Style::default().fg(if cs {
+                                    app.theme.green
+                                } else {
+                                    app.theme.muted
+                                }),
+                            ),
+                        ]));
+                    }
+
+                    if !d.prerequisites.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::styled("Prereqs:      ", Style::default().fg(app.theme.cyan)),
+                            Span::styled(
+                                d.prerequisites.join(", "),
+                                Style::default().fg(app.theme.fg),
+                            ),
+                        ]));
+                    }
+
+                    if let Some(dev) = &d.developer {
+                        lines.push(Line::from(vec![
+                            Span::styled("Developer:    ", Style::default().fg(app.theme.cyan)),
+                            Span::styled(dev, Style::default().fg(app.theme.fg)),
+                        ]));
+                    }
+
+                    if !d.genres.is_empty() {
+                        let non_generic: Vec<&str> = d
+                            .genres
+                            .iter()
+                            .filter(|x| *x != "games" && *x != "applications" && *x != "public")
+                            .map(|s| s.as_str())
+                            .collect();
+                        if !non_generic.is_empty() {
+                            lines.push(Line::from(vec![
+                                Span::styled("Genre:        ", Style::default().fg(app.theme.cyan)),
+                                Span::styled(
+                                    non_generic.join(" / "),
+                                    Style::default().fg(app.theme.fg),
+                                ),
+                            ]));
+                        }
+                    }
+                } else {
                     lines.push(Line::from(vec![
-                        Span::styled("Install Path: ", Style::default().fg(app.theme.cyan)),
-                        Span::styled(p, Style::default().fg(app.theme.fg)),
+                        Span::styled("Download:     ", Style::default().fg(app.theme.cyan)),
+                        Span::styled(
+                            "Fetching game information...",
+                            Style::default().fg(app.theme.muted),
+                        ),
                     ]));
                 }
             }

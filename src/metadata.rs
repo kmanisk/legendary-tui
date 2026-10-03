@@ -39,8 +39,8 @@ impl MetadataManager {
 
         // Try cache file on disk
         if let Some(d) = load_cached_details(&game.app_name) {
-            if !d.manifest_cached {
-                self.request_fetch(&game.app_name);
+            if !d.manifest_cached || d.protondb_tier.is_none() {
+                self.request_fetch(&game.app_name, &game.title);
             }
             self.cache.insert(game.app_name.clone(), d.clone());
             return Some(d);
@@ -48,8 +48,8 @@ impl MetadataManager {
 
         // Try parsing legendary's local metadata
         if let Some(d) = load_from_legendary_files(game) {
-            if !d.manifest_cached {
-                self.request_fetch(&game.app_name);
+            if !d.manifest_cached || d.protondb_tier.is_none() {
+                self.request_fetch(&game.app_name, &game.title);
             }
             save_cached_details(&d);
             self.cache.insert(game.app_name.clone(), d.clone());
@@ -57,7 +57,7 @@ impl MetadataManager {
         }
 
         // Neither exists; request background fetch
-        self.request_fetch(&game.app_name);
+        self.request_fetch(&game.app_name, &game.title);
         None
     }
 
@@ -65,18 +65,31 @@ impl MetadataManager {
         self.cache.get(app_name)
     }
 
-    pub fn request_fetch(&mut self, app_name: &str) {
+    pub fn request_fetch(&mut self, app_name: &str, title: &str) {
         if self.pending.contains_key(app_name) {
             return;
         }
         self.pending.insert(app_name.to_string(), true);
         let id = app_name.to_string();
+        let game_title = title.to_string();
         let tx = self.tx.clone();
         thread::spawn(move || {
-            if let Some(details) = fetch_legendary_info(&id) {
-                save_cached_details(&details);
-                let _ = tx.send((id, details));
+            let mut details = fetch_legendary_info(&id)
+                .or_else(|| load_cached_details(&id))
+                .unwrap_or_else(|| GameDetails {
+                    app_name: id.clone(),
+                    title: game_title.clone(),
+                    ..Default::default()
+                });
+
+            if details.protondb_tier.is_none() {
+                if let Some(tier) = fetch_protondb_tier(&game_title) {
+                    details.protondb_tier = Some(tier);
+                }
             }
+
+            save_cached_details(&details);
+            let _ = tx.send((id, details));
         });
     }
 
@@ -186,14 +199,6 @@ pub fn parse_legendary_metadata_json(val: &serde_json::Value, details: &mut Game
             for c in cats {
                 if let Some(p) = c.get("path").and_then(|v| v.as_str()) {
                     if p != "games" && p != "applications" && p != "public" {
-                        genres.push(p.to_string());
-                    }
-                }
-            }
-            if genres.is_empty() {
-                // If only generic categories exist, use them
-                for c in cats {
-                    if let Some(p) = c.get("path").and_then(|v| v.as_str()) {
                         genres.push(p.to_string());
                     }
                 }
@@ -369,6 +374,87 @@ pub fn fetch_legendary_info(app_name: &str) -> Option<GameDetails> {
 
     details.manifest_cached = true;
     Some(details)
+}
+
+/// Fetch ProtonDB compatibility tier by searching game title on Steam, then querying ProtonDB.
+pub fn fetch_protondb_tier(title: &str) -> Option<String> {
+    // 1. Clean the title: remove (R), (TM), etc.
+    let clean_title = title.replace(['™', '®', '©'], "").trim().to_string();
+
+    if clean_title.is_empty() {
+        return None;
+    }
+
+    // 2. Query Steam storesearch
+    let search_out = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "-m",
+            "4",
+            "-G",
+            "https://store.steampowered.com/api/storesearch/",
+            "--data-urlencode",
+            &format!("term={clean_title}"),
+            "--data-urlencode",
+            "l=english",
+            "--data-urlencode",
+            "cc=US",
+        ])
+        .output()
+        .ok()?;
+
+    if !search_out.status.success() {
+        return None;
+    }
+
+    let search_json: serde_json::Value = serde_json::from_slice(&search_out.stdout).ok()?;
+    let items = search_json.get("items")?.as_array()?;
+    if items.is_empty() {
+        return None;
+    }
+
+    let steam_id = items
+        .iter()
+        .find(|item| {
+            item.get("name")
+                .and_then(|n| n.as_str())
+                .map(|n| n.eq_ignore_ascii_case(&clean_title))
+                .unwrap_or(false)
+        })
+        .or_else(|| items.first())
+        .and_then(|item| item.get("id"))
+        .and_then(|id| id.as_u64())?;
+
+    // 3. Query ProtonDB summary
+    let proton_out = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "-m",
+            "4",
+            &format!("https://www.protondb.com/api/v1/reports/summaries/{steam_id}.json"),
+        ])
+        .output()
+        .ok()?;
+
+    if !proton_out.status.success() {
+        return None;
+    }
+
+    let proton_json: serde_json::Value = serde_json::from_slice(&proton_out.stdout).ok()?;
+    let raw_tier = proton_json.get("tier")?.as_str()?;
+
+    let lower = raw_tier.to_lowercase();
+    let tier = match lower.as_str() {
+        "platinum" => "Platinum",
+        "gold" => "Gold",
+        "silver" => "Silver",
+        "bronze" => "Bronze",
+        "borked" => "Borked",
+        "native" => "Native",
+        _ => raw_tier,
+    };
+
+    Some(tier.to_string())
 }
 
 #[cfg(test)]
