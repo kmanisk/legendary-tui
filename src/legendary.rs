@@ -100,3 +100,21 @@ pub fn legendary_default_dir() -> Option<String> {
     }
     None
 }
+
+/// Check online for game updates using legendary. Returns map of app_name -> available_version.
+pub fn check_installed_updates() -> Result<HashMap<String, String>, String> {
+    let text = capture(&["list-installed", "--check-updates", "--csv"])?;
+    let mut map = HashMap::new();
+    for line in text.lines().skip(1) {
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() >= 5 {
+            let app_name = parts[0].trim();
+            let avail_ver = parts[3].trim();
+            let has_update = parts[4].trim().eq_ignore_ascii_case("true");
+            if has_update && !app_name.is_empty() {
+                map.insert(app_name.to_string(), avail_ver.to_string());
+            }
+        }
+    }
+    Ok(map)
+}

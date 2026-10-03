@@ -18,27 +18,91 @@ pub struct MetadataManager {
     tx: Sender<(String, GameDetails)>,
     rx: Receiver<(String, GameDetails)>,
     pending: HashMap<String, bool>,
+    protondb_cache: HashMap<String, String>,
+    protondb_tx: Sender<(String, String)>,
+    protondb_rx: Receiver<(String, String)>,
+    protondb_dirty: bool,
 }
 
 impl MetadataManager {
     pub fn new() -> Self {
         let (tx, rx) = channel();
+        let (pdb_tx, pdb_rx) = channel();
+        let pdb_cache = load_protondb_cache().unwrap_or_default();
         Self {
             cache: HashMap::new(),
             tx,
             rx,
             pending: HashMap::new(),
+            protondb_cache: pdb_cache,
+            protondb_tx: pdb_tx,
+            protondb_rx: pdb_rx,
+            protondb_dirty: false,
+        }
+    }
+
+    pub fn get_protondb_tier(&self, app_name: &str) -> Option<&str> {
+        self.protondb_cache.get(app_name).map(|s| s.as_str())
+    }
+
+    /// Bulk prefetch ProtonDB ratings concurrently for all games in the library in one go.
+    pub fn bulk_prefetch_protondb(&mut self, games: &[Game]) {
+        let missing: Vec<(String, String)> = games
+            .iter()
+            .filter(|g| {
+                !self.protondb_cache.contains_key(&g.app_name)
+                    && !self.pending.contains_key(&g.app_name)
+            })
+            .map(|g| (g.app_name.clone(), g.title.clone()))
+            .collect();
+
+        if missing.is_empty() {
+            return;
+        }
+
+        for (id, _) in &missing {
+            self.pending.insert(id.clone(), true);
+        }
+
+        let num_threads = 16.min(missing.len()).max(1);
+        let mut chunks = vec![Vec::new(); num_threads];
+        for (idx, item) in missing.into_iter().enumerate() {
+            chunks[idx % num_threads].push(item);
+        }
+
+        for chunk in chunks {
+            if chunk.is_empty() {
+                continue;
+            }
+            let tx = self.protondb_tx.clone();
+            thread::spawn(move || {
+                for (app_name, title) in chunk {
+                    let tier = fetch_protondb_tier(&title).unwrap_or_else(|| "Unknown".into());
+                    let _ = tx.send((app_name, tier));
+                }
+            });
         }
     }
 
     /// Try to get details immediately. If not cached, load from disk or schedule background fetch.
     pub fn get_or_load(&mut self, game: &Game) -> Option<GameDetails> {
-        if let Some(d) = self.cache.get(&game.app_name) {
-            return Some(d.clone());
+        if let Some(mut d) = self.cache.get(&game.app_name).cloned() {
+            if d.protondb_tier.is_none() {
+                if let Some(tier) = self.protondb_cache.get(&game.app_name) {
+                    d.protondb_tier = Some(tier.clone());
+                    self.cache.insert(game.app_name.clone(), d.clone());
+                }
+            }
+            return Some(d);
         }
 
         // Try cache file on disk
-        if let Some(d) = load_cached_details(&game.app_name) {
+        if let Some(mut d) = load_cached_details(&game.app_name) {
+            if d.protondb_tier.is_none() {
+                if let Some(tier) = self.protondb_cache.get(&game.app_name) {
+                    d.protondb_tier = Some(tier.clone());
+                }
+            }
             if !d.manifest_cached || d.protondb_tier.is_none() {
                 self.request_fetch(&game.app_name, &game.title);
             }
@@ -47,7 +111,12 @@ impl MetadataManager {
         }
 
         // Try parsing legendary's local metadata
-        if let Some(d) = load_from_legendary_files(game) {
+        if let Some(mut d) = load_from_legendary_files(game) {
+            if d.protondb_tier.is_none() {
+                if let Some(tier) = self.protondb_cache.get(&game.app_name) {
+                    d.protondb_tier = Some(tier.clone());
+                }
+            }
             if !d.manifest_cached || d.protondb_tier.is_none() {
                 self.request_fetch(&game.app_name, &game.title);
             }
@@ -73,6 +142,7 @@ impl MetadataManager {
         let id = app_name.to_string();
         let game_title = title.to_string();
         let tx = self.tx.clone();
+        let cached_tier = self.protondb_cache.get(app_name).cloned();
         thread::spawn(move || {
             let mut details = fetch_legendary_info(&id)
                 .or_else(|| load_cached_details(&id))
@@ -83,7 +153,9 @@ impl MetadataManager {
                 });
 
             if details.protondb_tier.is_none() {
-                if let Some(tier) = fetch_protondb_tier(&game_title) {
+                if let Some(tier) = cached_tier {
+                    details.protondb_tier = Some(tier);
+                } else if let Some(tier) = fetch_protondb_tier(&game_title) {
                     details.protondb_tier = Some(tier);
                 }
             }
@@ -101,7 +173,36 @@ impl MetadataManager {
             self.cache.insert(id, details);
             updated = true;
         }
+        while let Ok((id, tier)) = self.protondb_rx.try_recv() {
+            self.pending.remove(&id);
+            self.protondb_cache.insert(id.clone(), tier.clone());
+            self.protondb_dirty = true;
+            if let Some(details) = self.cache.get_mut(&id) {
+                details.protondb_tier = Some(tier);
+                save_cached_details(details);
+            }
+            updated = true;
+        }
+        if self.protondb_dirty {
+            save_protondb_cache(&self.protondb_cache);
+            self.protondb_dirty = false;
+        }
         updated
+    }
+}
+
+fn protondb_cache_file() -> PathBuf {
+    filesystem::cache_dir().join("protondb.json")
+}
+
+pub fn load_protondb_cache() -> Option<HashMap<String, String>> {
+    let bytes = std::fs::read(protondb_cache_file()).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+pub fn save_protondb_cache(cache: &HashMap<String, String>) {
+    if let Ok(bytes) = serde_json::to_vec_pretty(cache) {
+        let _ = filesystem::atomic_write(&protondb_cache_file(), &bytes);
     }
 }
 

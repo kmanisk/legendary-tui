@@ -18,6 +18,11 @@ pub fn cache_file() -> PathBuf {
     home().join(".cache/egs/library.json")
 }
 
+/// `~/.cache/egs/`
+pub fn cache_dir() -> PathBuf {
+    home().join(".cache/egs")
+}
+
 /// `~/.local/share/legendary/compatdata/`
 pub fn compatdata_dir() -> PathBuf {
     home().join(".local/share/legendary/compatdata")

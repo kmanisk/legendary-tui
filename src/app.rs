@@ -101,6 +101,7 @@ pub struct App {
     pub(crate) install_queue: Vec<String>,
     pub(crate) refreshing: bool,
     pub(crate) refresh_rx: Option<std::sync::mpsc::Receiver<LibraryResult>>,
+    pub(crate) updates_rx: Option<std::sync::mpsc::Receiver<HashMap<String, String>>>,
 }
 
 type LibraryResult = Result<Vec<(String, String)>, String>;
@@ -140,6 +141,12 @@ impl App {
             Some(games) => games.into_iter().map(|g| (g.app_name, g.title)).collect(),
             None => Self::fetch_library()?,
         };
+        let cached_updates: Option<HashMap<String, String>> = {
+            let path = crate::filesystem::cache_dir().join("updates.json");
+            std::fs::read(path)
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+        };
         let mut app = Self {
             games: Vec::new(),
             filtered: Vec::new(),
@@ -164,10 +171,15 @@ impl App {
             install_queue: Vec::new(),
             refreshing: false,
             refresh_rx: None,
+            updates_rx: None,
         };
         app.set_library(lib);
         app.refresh_installed()?;
+        if let Some(upds) = &cached_updates {
+            app.apply_updates_map(upds);
+        }
         app.update_selected_details();
+        app.spawn_update_check();
         Ok(app)
     }
 
@@ -194,8 +206,11 @@ impl App {
                 installed: false,
                 version: None,
                 install_path: None,
+                needs_update: false,
+                available_version: None,
             })
             .collect();
+        self.metadata_mgr.bulk_prefetch_protondb(&self.games);
         self.apply_filter();
     }
 
@@ -214,6 +229,8 @@ impl App {
                     g.installed = false;
                     g.version = None;
                     g.install_path = None;
+                    g.needs_update = false;
+                    g.available_version = None;
                 }
             }
         }
@@ -228,6 +245,7 @@ impl App {
             }
         }
         self.update_selected_details();
+        self.spawn_update_check();
         Ok(())
     }
 
@@ -308,7 +326,45 @@ impl App {
             }
         }
 
+        // 4. Poll background game update check
+        if let Some(rx) = &self.updates_rx {
+            if let Ok(updates) = rx.try_recv() {
+                self.apply_updates_map(&updates);
+                self.updates_rx = None;
+                updated = true;
+            }
+        }
+
         updated
+    }
+
+    pub fn spawn_update_check(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.updates_rx = Some(rx);
+        std::thread::spawn(move || {
+            if let Ok(upds) = crate::legendary::check_installed_updates() {
+                let _ = tx.send(upds);
+            }
+        });
+    }
+
+    pub fn apply_updates_map(&mut self, updates: &HashMap<String, String>) {
+        let cache_file = crate::filesystem::cache_dir().join("updates.json");
+        if let Ok(bytes) = serde_json::to_vec_pretty(updates) {
+            let _ = crate::filesystem::atomic_write(&cache_file, &bytes);
+        }
+        for g in &mut self.games {
+            if g.installed {
+                if let Some(avail) = updates.get(&g.app_name) {
+                    g.needs_update = true;
+                    g.available_version = Some(avail.clone());
+                } else {
+                    g.needs_update = false;
+                    g.available_version = None;
+                }
+            }
+        }
+        self.update_selected_details();
     }
 
     pub fn in_input_mode(&self) -> bool {
@@ -323,6 +379,8 @@ impl App {
         if let Some(g) = self.current().cloned() {
             let mut d = self.metadata_mgr.get_or_load(&g);
             if let Some(details) = &mut d {
+                details.needs_update = g.needs_update;
+                details.available_version = g.available_version.clone();
                 if g.installed {
                     details.installed = true;
                     if details.installed_size.is_none() {
@@ -1176,8 +1234,20 @@ impl App {
             .and_then(|g| g.proton.clone())
             .unwrap_or_else(|| format!("Default ({})", self.cfg.default_proton));
 
-        let mut items = vec![
-            ("Play".to_string(), Op::Play(app.to_string())),
+        let game_obj = self.games.iter().find(|g| g.app_name == app);
+        let has_update = game_obj.map(|g| g.needs_update).unwrap_or(false);
+        let avail_ver = game_obj.and_then(|g| g.available_version.clone());
+
+        let mut items = vec![("Play".to_string(), Op::Play(app.to_string()))];
+        if has_update {
+            let label = match avail_ver {
+                Some(v) => format!("★ Update to version {v} (u) ★"),
+                None => "★ Update game (u) ★".to_string(),
+            };
+            items.push((label, Op::Update(app.to_string())));
+        }
+
+        items.extend(vec![
             (
                 format!(
                     "MangoHud:           {}",
@@ -1224,7 +1294,7 @@ impl App {
                 "Delete game + prefix".to_string(),
                 Op::DeleteGamePrefix(app.to_string()),
             ),
-        ];
+        ]);
         items.push(if in_rofi {
             (
                 "Remove Alt+G entry".to_string(),
@@ -2320,6 +2390,8 @@ mod tests {
                     installed: false,
                     version: None,
                     install_path: None,
+                    needs_update: false,
+                    available_version: None,
                 },
                 Game {
                     app_name: "app2".into(),
@@ -2327,6 +2399,8 @@ mod tests {
                     installed: true,
                     version: Some("1.0".into()),
                     install_path: Some("/mnt/games/beta".into()),
+                    needs_update: false,
+                    available_version: None,
                 },
                 Game {
                     app_name: "app3".into(),
@@ -2334,6 +2408,8 @@ mod tests {
                     installed: false,
                     version: None,
                     install_path: None,
+                    needs_update: false,
+                    available_version: None,
                 },
             ],
             filtered: Vec::new(),
@@ -2358,6 +2434,7 @@ mod tests {
             install_queue: Vec::new(),
             refreshing: false,
             refresh_rx: None,
+            updates_rx: None,
         };
         app.apply_filter();
         app.update_selected_details();

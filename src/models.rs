@@ -12,6 +12,10 @@ pub struct Game {
     pub installed: bool,
     pub version: Option<String>,
     pub install_path: Option<String>,
+    #[serde(default)]
+    pub needs_update: bool,
+    #[serde(default)]
+    pub available_version: Option<String>,
 }
 
 /// Rich metadata for a game (cached on disk / in memory).
@@ -57,6 +61,10 @@ pub struct GameDetails {
     pub manifest_cached: bool,
     #[serde(default)]
     pub protondb_tier: Option<String>,
+    #[serde(default)]
+    pub needs_update: bool,
+    #[serde(default)]
+    pub available_version: Option<String>,
 }
 
 /// Relevance score for search ranking: exact > prefix > substring > fuzzy.
@@ -143,6 +151,8 @@ mod tests {
             installed: false,
             version: None,
             install_path: None,
+            needs_update: false,
+            available_version: None,
         };
         let d = GameDetails {
             app_name: "4656facc".into(),

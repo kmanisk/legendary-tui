@@ -259,11 +259,26 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(app.theme.fg)
                 };
 
-                let line = Line::from(vec![
+                let mut spans = vec![
                     Span::styled(check_str, check_style),
                     Span::styled(inst_str, inst_style),
                     Span::styled(g.title.clone(), title_style),
-                ]);
+                ];
+                if g.needs_update {
+                    spans.push(Span::styled(
+                        " [UPDATE]",
+                        if is_sel {
+                            Style::default()
+                                .fg(app.theme.on_accent)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                                .fg(app.theme.yellow)
+                                .add_modifier(Modifier::BOLD)
+                        },
+                    ));
+                }
+                let line = Line::from(spans);
                 ListItem::new(line)
             }
         })
@@ -335,7 +350,7 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
 
             if g.installed {
                 // State: Installed
-                lines.push(Line::from(vec![
+                let mut state_spans = vec![
                     Span::styled("State:        ", Style::default().fg(app.theme.cyan)),
                     Span::styled(
                         "Installed",
@@ -343,7 +358,17 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                             .fg(app.theme.green)
                             .add_modifier(Modifier::BOLD),
                     ),
-                ]));
+                ];
+                if g.needs_update {
+                    let avail = g.available_version.as_deref().unwrap_or("latest");
+                    state_spans.push(Span::styled(
+                        format!(" [UPDATE: -> {avail}]"),
+                        Style::default()
+                            .fg(app.theme.yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                }
+                lines.push(Line::from(state_spans));
 
                 // Clean Version (without noisy hash)
                 let ver = g
@@ -357,8 +382,10 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                 ]));
 
                 // ProtonDB Rating
-                let (pdb_lbl, pdb_val) =
-                    protondb_badge(details.and_then(|d| d.protondb_tier.as_deref()), &app.theme);
+                let pdb_tier = details
+                    .and_then(|d| d.protondb_tier.as_deref())
+                    .or_else(|| app.metadata_mgr.get_protondb_tier(&g.app_name));
+                let (pdb_lbl, pdb_val) = protondb_badge(pdb_tier, &app.theme);
                 lines.push(Line::from(vec![pdb_lbl, pdb_val]));
 
                 // Installed Size
