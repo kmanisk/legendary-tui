@@ -15,7 +15,7 @@ optdepends=(
 )
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/kmanisk/$pkgname/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('5e657d7210fe49352024e599db57b07f2b4f286ff9ba250b3bfdeafaa9284872')
 
 prepare() {
     cd "$pkgname-$pkgver"
