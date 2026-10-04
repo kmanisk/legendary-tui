@@ -1,4 +1,4 @@
-# legendary-tui (`egs`)
+# legendary-tui
 
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
 [![AUR package](https://img.shields.io/aur/version/legendary-tui)](https://aur.archlinux.org/packages/legendary-tui)
@@ -6,7 +6,7 @@
 
 A lightweight, keyboard-driven Ratatui TUI frontend for the [Legendary](https://github.com/derrod/legendary) Epic Games Store CLI, designed for Linux gaming desktops and handhelds.
 
-Installed executable: **`egs`**
+Installed executable: **`legendary-tui`**
 
 ---
 
@@ -27,7 +27,7 @@ Installed executable: **`egs`**
 ### Linux Gaming & Compositor Integration
 - **Proton & Wine Discovery**: Automatic discovery of installed Proton-GE, Proton Experimental, Proton CachyOS, and system Wine runners.
 - **Per-Game Tuning**:
-  - Dedicated prefix root isolation (`~/.local/share/egs/prefixes/<appid>/`).
+  - Dedicated prefix root isolation (`~/.local/share/legendary-tui/prefixes/<appid>/`).
   - Per-game or global Proton version selection.
   - MangoHud HUD toggle.
   - Feral GameMode optimization toggle.
@@ -82,9 +82,10 @@ Installed executable: **`egs`**
 ### Arch Linux / CachyOS (AUR)
 ```bash
 # Release package:
-yay -S legendary-tui
+paru -S legendary-tui   # or yay -S legendary-tui
+
 # Or development git package:
-yay -S legendary-tui-git
+paru -S legendary-tui-git   # or yay -S legendary-tui-git
 ```
 
 ### From Source (Cargo)
@@ -93,7 +94,7 @@ Ensure Rust and Cargo are installed:
 git clone https://github.com/kmanisk/legendary-tui.git
 cd legendary-tui
 cargo build --release
-install -Dm755 target/release/egs ~/.local/bin/egs
+install -Dm755 target/release/legendary-tui ~/.local/bin/legendary-tui
 ```
 
 ### Dependencies
@@ -104,6 +105,6 @@ install -Dm755 target/release/egs ~/.local/bin/egs
 
 ## Architecture & Safety Guarantees
 
-- **No Daemons**: `egs` exits completely when closed; no lingering background processes or persistent system services.
+- **No Daemons**: `legendary-tui` exits completely when closed; no lingering background processes or persistent system services.
 - **Fail-Safe Destructive Operations**: All delete, move, sync overwrite, and logout operations require explicit modal confirmation.
 - **Prefix Isolation**: Dedicated Wine prefixes ensure game compatdata stays clean and unpolluted.

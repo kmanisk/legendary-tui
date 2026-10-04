@@ -333,3 +333,19 @@ pub fn logout() -> Result<String, String> {
     }
     Ok("Logged out of Epic Games Store.".into())
 }
+
+/// Read cached logged-in display name from `~/.config/legendary/user.json`.
+pub fn current_username() -> Option<String> {
+    let p = crate::filesystem::home().join(".config/legendary/user.json");
+    if let Ok(content) = std::fs::read_to_string(p) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(name) = v.get("displayName").and_then(|s| s.as_str()) {
+                let trimmed = name.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+    }
+    None
+}

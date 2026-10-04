@@ -132,6 +132,7 @@ pub struct App {
     pub(crate) updates_rx: Option<std::sync::mpsc::Receiver<HashMap<String, String>>>,
     pub(crate) active_verify: Option<ActiveVerify>,
     pub(crate) bg_action_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    pub(crate) user_name: Option<String>,
 }
 
 type LibraryResult = Result<Vec<(String, String)>, String>;
@@ -205,6 +206,7 @@ impl App {
             updates_rx: None,
             active_verify: None,
             bg_action_rx: None,
+            user_name: legendary::current_username(),
         };
         app.set_library(lib);
         app.refresh_installed()?;
@@ -1525,6 +1527,7 @@ impl App {
                 guard.disarm();
                 self.suspended = true;
                 if ok {
+                    self.user_name = crate::legendary::current_username();
                     self.say("Authentication session updated.");
                     let _ = self.refresh_installed();
                 } else {
@@ -1545,6 +1548,7 @@ impl App {
             }
             Op::DoLogout => match crate::legendary::logout() {
                 Ok(msg) => {
+                    self.user_name = None;
                     self.say(msg);
                     self.games.clear();
                     self.filtered.clear();
@@ -2258,7 +2262,7 @@ impl App {
                             "".into(),
                             format!("{title}: {perc:.1}%"),
                             "".into(),
-                            "Quit egs and cancel the download?".into(),
+                            "Quit legendary-tui and cancel the download?".into(),
                         ],
                         op: Op::QuitWithCancel,
                     };
@@ -3147,6 +3151,7 @@ mod tests {
             updates_rx: None,
             active_verify: None,
             bg_action_rx: None,
+            user_name: Some("TestUser".into()),
         };
         app.apply_filter();
         app.update_selected_details();

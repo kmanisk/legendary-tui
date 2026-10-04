@@ -1,6 +1,6 @@
 # Maintainer: Manisk Mathew <kmanisk>
 pkgname=legendary-tui
-pkgver=1.0.0
+pkgver=1.0.1
 pkgrel=1
 pkgdesc="Fast, keyboard-driven Ratatui TUI frontend for Legendary Epic Games Store CLI"
 arch=('x86_64')
@@ -15,7 +15,7 @@ optdepends=(
 )
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/kmanisk/$pkgname/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('3af1da23caa27f13802894075133fd68db934990d38160d73c191f45848efecf')
+sha256sums=('SKIP')
 
 prepare() {
     cd "$pkgname-$pkgver"
@@ -38,6 +38,6 @@ check() {
 
 package() {
     cd "$pkgname-$pkgver"
-    install -Dm755 "target/release/egs" "$pkgdir/usr/bin/egs"
+    install -Dm755 "target/release/legendary-tui" "$pkgdir/usr/bin/legendary-tui"
     install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
 }

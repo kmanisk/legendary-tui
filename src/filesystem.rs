@@ -8,19 +8,35 @@ pub fn home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
-/// `~/.config/egs/`
+/// `~/.config/legendary-tui/`
 pub fn config_dir() -> PathBuf {
-    home().join(".config/egs")
+    let p = home().join(".config/legendary-tui");
+    if p.exists() {
+        return p;
+    }
+    let legacy = home().join(".config/egs");
+    if legacy.exists() {
+        return legacy;
+    }
+    p
 }
 
-/// `~/.cache/egs/library.json`
+/// `~/.cache/legendary-tui/library.json`
 pub fn cache_file() -> PathBuf {
-    home().join(".cache/egs/library.json")
+    cache_dir().join("library.json")
 }
 
-/// `~/.cache/egs/`
+/// `~/.cache/legendary-tui/`
 pub fn cache_dir() -> PathBuf {
-    home().join(".cache/egs")
+    let p = home().join(".cache/legendary-tui");
+    if p.exists() {
+        return p;
+    }
+    let legacy = home().join(".cache/egs");
+    if legacy.exists() {
+        return legacy;
+    }
+    p
 }
 
 /// `~/.local/share/legendary/compatdata/`
@@ -28,14 +44,22 @@ pub fn compatdata_dir() -> PathBuf {
     home().join(".local/share/legendary/compatdata")
 }
 
-/// Dedicated Epic prefix directory: `~/.local/share/egs/prefixes/`
+/// Dedicated Epic prefix directory: `~/.local/share/legendary-tui/prefixes/`
 pub fn prefixes_dir() -> PathBuf {
-    home().join(".local/share/egs/prefixes")
+    let p = home().join(".local/share/legendary-tui/prefixes");
+    if p.exists() {
+        return p;
+    }
+    let legacy = home().join(".local/share/egs/prefixes");
+    if legacy.exists() {
+        return legacy;
+    }
+    p
 }
 
-/// Metadata cache directory: `~/.cache/egs/metadata/`
+/// Metadata cache directory: `~/.cache/legendary-tui/metadata/`
 pub fn metadata_cache_dir() -> PathBuf {
-    home().join(".cache/egs/metadata")
+    cache_dir().join("metadata")
 }
 
 /// Legendary's metadata directory: `~/.config/legendary/metadata/`

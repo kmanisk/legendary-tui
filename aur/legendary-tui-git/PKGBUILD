@@ -47,6 +47,6 @@ check() {
 
 package() {
     cd "$_pkgname"
-    install -Dm755 "target/release/egs" "$pkgdir/usr/bin/egs"
+    install -Dm755 "target/release/legendary-tui" "$pkgdir/usr/bin/legendary-tui"
     install -Dm644 README.md "$pkgdir/usr/share/doc/$_pkgname/README.md"
 }

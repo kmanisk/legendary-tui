@@ -1,4 +1,4 @@
-//! egs — native Epic Games library TUI (legendary backend, Alt+G integration).
+//! legendary-tui — native Epic Games library TUI (legendary backend, Alt+G integration).
 
 mod app;
 mod cache;
@@ -135,7 +135,7 @@ fn main() {
 
     if let Err(e) = run() {
         restore_terminal();
-        eprintln!("egs: {e}");
+        eprintln!("legendary-tui: {e}");
         std::process::exit(1);
     }
     restore_terminal();
@@ -232,7 +232,9 @@ fn ensure_legendary_installed() -> Result<(), String> {
     }
     let trimmed = answer.trim().to_lowercase();
     if !trimmed.is_empty() && trimmed != "y" && trimmed != "yes" {
-        return Err("Installation cancelled by user. 'legendary' is required to run egs.".into());
+        return Err(
+            "Installation cancelled by user. 'legendary' is required to run legendary-tui.".into(),
+        );
     }
 
     println!("Running: {}", install_cmd);
@@ -255,7 +257,7 @@ fn ensure_legendary_installed() -> Result<(), String> {
         return Err("Installed legendary, but 'legendary' is still not found in PATH.".into());
     }
 
-    println!("\x1b[1;32m[✓] legendary successfully installed! Launching egs...\x1b[0m");
+    println!("\x1b[1;32m[✓] legendary successfully installed! Launching legendary-tui...\x1b[0m");
     std::thread::sleep(std::time::Duration::from_millis(600));
     Ok(())
 }

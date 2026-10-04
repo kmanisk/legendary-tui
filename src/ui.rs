@@ -1,8 +1,8 @@
-//! All rendering for egs. Read-only over App; no side effects, no animation.
+//! All rendering for legendary-tui. Read-only over App; no side effects, no animation.
 //! Follows the desktop theme: accent fills, solid backgrounds, and high-contrast text.
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
@@ -113,12 +113,31 @@ pub fn draw(f: &mut Frame, app: &App) {
             Style::default().fg(app.theme.yellow),
         ));
     }
-    let header = Paragraph::new(vec![Line::from(header_spans)]).block(
+    let header_block = if let Some(user) = &app.user_name {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(app.theme.muted))
-            .style(Style::default().bg(app.theme.bg).fg(app.theme.fg)),
-    );
+            .style(Style::default().bg(app.theme.bg).fg(app.theme.fg))
+            .title_top(
+                Line::from(vec![
+                    Span::styled(" [", Style::default().fg(app.theme.muted)),
+                    Span::styled(
+                        format!("👤 {user}"),
+                        Style::default()
+                            .fg(app.theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("] ", Style::default().fg(app.theme.muted)),
+                ])
+                .alignment(Alignment::Right),
+            )
+    } else {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.theme.muted))
+            .style(Style::default().bg(app.theme.bg).fg(app.theme.fg))
+    };
+    let header = Paragraph::new(vec![Line::from(header_spans)]).block(header_block);
     f.render_widget(header, rows[0]);
 
     // Body: list | detail
@@ -1274,7 +1293,7 @@ fn draw_help_popup(f: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "Dedicated Epic Prefixes: ~/.local/share/egs/prefixes/<appid>/",
+            "Dedicated Epic Prefixes: ~/.local/share/legendary-tui/prefixes/<appid>/",
             Style::default().fg(app.theme.muted),
         )),
         Line::from(Span::styled(

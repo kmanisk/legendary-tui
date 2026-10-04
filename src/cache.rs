@@ -1,5 +1,5 @@
 //! Small library cache: instant startup, explicit refresh only.
-//! `~/.cache/egs/library.json`, written atomically, never polled.
+//! `~/.cache/legendary-tui/library.json`, written atomically, never polled.
 
 use serde::{Deserialize, Serialize};
 

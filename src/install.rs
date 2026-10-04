@@ -1,4 +1,4 @@
-//! Live download and install progress handling inside EGS.
+//! Live download and install progress handling inside legendary-tui.
 //!
 //! Spawns Legendary as a non-blocking child process, redirects and incrementally
 //! parses stdout/stderr lines into structured progress state, renders in Ratatui,

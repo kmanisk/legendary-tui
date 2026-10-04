@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::filesystem;
 
 /// Resolve existing prefix for `app_name`.
-/// Checks dedicated prefixes first (`~/.local/share/egs/prefixes/<app_name>`),
+/// Checks dedicated prefixes first (`~/.local/share/legendary-tui/prefixes/<app_name>`),
 /// then legacy compatdata directory (`~/.local/share/legendary/compatdata/<field>`).
 /// Returns None unless a directory actually exists on disk.
 pub fn resolve(app_name: &str, registry_prefix: &str) -> Option<PathBuf> {

@@ -1,4 +1,4 @@
-//! Minimal TOML config for egs. Dependency-free on purpose.
+//! Minimal TOML config for legendary-tui. Dependency-free on purpose.
 //!
 //! ```toml
 //! default_install_path = "/mnt/Games/EpicGames"
@@ -169,7 +169,7 @@ pub fn parse(text: &str) -> Config {
 
 pub fn render(cfg: &Config) -> String {
     let mut out = format!(
-        "# egs configuration — managed by the egs TUI (Settings).\n\
+        "# legendary-tui configuration — managed by the legendary-tui TUI (Settings).\n\
          # Keys are stable Epic app_name values, never display titles.\n\
          default_install_path = \"{}\"\n\
          default_prefix_path = \"{}\"\n\
