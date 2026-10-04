@@ -12,6 +12,6 @@ pkgbase = legendary-tui
 	optdepends = mangohud: performance overlay support
 	optdepends = gamemode: gaming performance optimization
 	source = legendary-tui-1.0.0.tar.gz::https://github.com/kmanisk/legendary-tui/archive/refs/tags/v1.0.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 3af1da23caa27f13802894075133fd68db934990d38160d73c191f45848efecf
 
 pkgname = legendary-tui
