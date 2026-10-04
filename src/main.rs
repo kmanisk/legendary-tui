@@ -263,8 +263,20 @@ fn run() -> Result<(), String> {
     let mut app = App::new()?;
     let mut term = enter_tui()?;
 
+    let theme_reload_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _ = signal_hook::flag::register(
+        signal_hook::consts::SIGUSR2,
+        std::sync::Arc::clone(&theme_reload_flag),
+    );
+
     loop {
-        // Poll ongoing background tasks (metadata fetch, active install progress)
+        // Handle instantaneous SIGUSR2 theme reload
+        if theme_reload_flag.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            app.reload_theme();
+            app.dirty = true;
+        }
+
+        // Poll ongoing background tasks (metadata fetch, active install progress, theme mtime)
         if app.poll_tick() {
             app.dirty = true;
         }

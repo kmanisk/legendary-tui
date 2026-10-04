@@ -117,18 +117,30 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_detail(f, app, cols[1]);
 
     // Footer
+    let footer_border_color = if app.searching {
+        app.theme.accent
+    } else {
+        app.theme.muted
+    };
+
     let footer_text = if app.searching {
         vec![
             Line::from(vec![
                 Span::styled(
-                    "Search: ",
+                    "/ ",
                     Style::default()
                         .fg(app.theme.accent)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(&app.search, Style::default().fg(app.theme.fg)),
                 Span::styled(
-                    "  [Enter] done · [Esc] clear",
+                    &app.search,
+                    Style::default()
+                        .fg(app.theme.fg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("█", Style::default().fg(app.theme.accent)),
+                Span::styled(
+                    "   [Enter] accept · [Esc] cancel",
                     Style::default().fg(app.theme.muted),
                 ),
             ]),
@@ -178,6 +190,18 @@ pub fn draw(f: &mut Frame, app: &App) {
         spans.extend(vec![
             Span::styled("Tab", key_style),
             Span::styled(" Select  ", fg_style),
+            Span::styled("/", key_style),
+            Span::styled(" Search  ", fg_style),
+        ]);
+
+        if !app.search.is_empty() {
+            spans.extend(vec![
+                Span::styled("Esc", key_style),
+                Span::styled(" Clear Search  ", fg_style),
+            ]);
+        }
+
+        spans.extend(vec![
             Span::styled("f", key_style),
             Span::styled(" Filter  ", fg_style),
             Span::styled("r", key_style),
@@ -202,7 +226,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let footer = Paragraph::new(footer_text).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(app.theme.muted))
+            .border_style(Style::default().fg(footer_border_color))
             .style(Style::default().bg(app.theme.bg).fg(app.theme.fg)),
     );
     f.render_widget(footer, rows[2]);
@@ -219,28 +243,6 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_list(f: &mut Frame, app: &App, area: Rect) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1)])
-        .split(area);
-
-    let search_title = format!("Search [{}]", app.filter.label());
-    let search = Paragraph::new(format!("> {}", app.search)).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(if app.searching {
-                app.theme.accent
-            } else {
-                app.theme.muted
-            }))
-            .title(Span::styled(
-                format!(" {search_title} "),
-                Style::default().fg(app.theme.accent),
-            ))
-            .style(Style::default().bg(app.theme.bg).fg(app.theme.fg)),
-    );
-    f.render_widget(search, rows[0]);
-
     let items: Vec<ListItem> = app
         .filtered_rows()
         .iter()
@@ -355,6 +357,11 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
 
     let mut state = ratatui::widgets::ListState::default();
     state.select(Some(app.selected));
+    let title_str = if app.search.is_empty() {
+        format!(" Library [{}] ", app.filter.label())
+    } else {
+        format!(" Library [{}] • /{} ", app.filter.label(), app.search)
+    };
     let list = List::new(items)
         .block(
             Block::default()
@@ -362,7 +369,7 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
                 .border_style(Style::default().fg(app.theme.sel))
                 .style(Style::default().bg(app.theme.bg).fg(app.theme.fg))
                 .title(Span::styled(
-                    " Library ",
+                    title_str,
                     Style::default().fg(app.theme.accent),
                 )),
         )
@@ -373,7 +380,7 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
                 .fg(app.theme.on_accent)
                 .add_modifier(Modifier::BOLD),
         );
-    f.render_stateful_widget(list, rows[1], &mut state);
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 fn protondb_badge<'a>(tier: Option<&str>, theme: &'a crate::theme::Theme) -> (Span<'a>, Span<'a>) {

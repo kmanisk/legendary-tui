@@ -56,23 +56,43 @@ fn var(text: &str, name: &str) -> Option<String> {
     None
 }
 
+pub fn is_bright(c: Color) -> bool {
+    if let Color::Rgb(r, g, b) = c {
+        let lum = 0.299 * (r as f32) + 0.587 * (g as f32) + 0.114 * (b as f32);
+        lum > 140.0
+    } else {
+        false
+    }
+}
+
+pub fn theme_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(filesystem::home().join(".local/state/theme/colors.sh"))
+        .ok()
+        .and_then(|m| m.modified().ok())
+}
+
 pub fn load() -> Theme {
     let text = std::fs::read_to_string(filesystem::home().join(".local/state/theme/colors.sh"))
         .unwrap_or_default();
     let get = |name: &str, fb: Color| var(&text, name).map(|v| hex(&v, fb)).unwrap_or(fb);
+    let accent_col = get("THEME_ACCENT", Color::Rgb(0x6d, 0x8d, 0xad));
+    let on_accent = if is_bright(accent_col) {
+        Color::Rgb(0x11, 0x14, 0x16)
+    } else {
+        Color::Rgb(0xff, 0xff, 0xff)
+    };
     Theme {
         bg: get("THEME_BG", Color::Rgb(0x1e, 0x21, 0x22)),
         bg2: get("THEME_BG2", Color::Rgb(0x28, 0x2b, 0x2c)),
         fg: get("THEME_FG", Color::Rgb(0xc7, 0xb8, 0x9d)),
-        accent: get("THEME_ACCENT", Color::Rgb(0x6d, 0x8d, 0xad)),
+        accent: accent_col,
         sel: get("THEME_SEL", Color::Rgb(0x39, 0x3c, 0x3d)),
         muted: get("THEME_MUTED", Color::Rgb(0x57, 0x5a, 0x5b)),
         red: get("THEME_RED", Color::Rgb(0xec, 0x6b, 0x64)),
         green: get("THEME_GREEN", Color::Rgb(0x89, 0xb4, 0x82)),
         yellow: get("THEME_YELLOW", Color::Rgb(0xd6, 0xb6, 0x76)),
         cyan: get("THEME_CYAN", Color::Rgb(0x82, 0xb3, 0xa8)),
-        // High-contrast text on accent selection, matching Rofi's selected-foreground: #ffffff
-        on_accent: Color::Rgb(0xff, 0xff, 0xff),
+        on_accent,
     }
 }
 

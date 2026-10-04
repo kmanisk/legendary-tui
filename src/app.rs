@@ -101,6 +101,7 @@ pub struct App {
     /// Deterministic `gg` state: first `g` arms, second executes, anything else clears.
     pending_g: bool,
     pub theme: crate::theme::Theme,
+    last_theme_mtime: Option<std::time::SystemTime>,
     pub(crate) metadata_mgr: metadata::MetadataManager,
     pub(crate) active_install: Option<ActiveInstall>,
     pub(crate) selected_details: Option<GameDetails>,
@@ -171,6 +172,7 @@ impl App {
             filter: Filter::All,
             pending_g: false,
             theme: crate::theme::load(),
+            last_theme_mtime: crate::theme::theme_mtime(),
             metadata_mgr: metadata::MetadataManager::new(),
             active_install: None,
             selected_details: None,
@@ -351,7 +353,21 @@ impl App {
             }
         }
 
+        // 5. Check if system theme colors.sh was updated live
+        if let Some(mtime) = crate::theme::theme_mtime() {
+            if self.last_theme_mtime != Some(mtime) {
+                self.reload_theme();
+                updated = true;
+            }
+        }
+
         updated
+    }
+
+    pub fn reload_theme(&mut self) {
+        self.theme = crate::theme::load();
+        self.last_theme_mtime = crate::theme::theme_mtime();
+        self.dirty = true;
     }
 
     pub fn spawn_update_check(&mut self) {
@@ -464,7 +480,11 @@ impl App {
         }
 
         self.filtered = rows;
-        self.ensure_valid_selection(self.selected);
+        if !self.search.trim().is_empty() {
+            self.jump_first();
+        } else {
+            self.ensure_valid_selection(self.selected);
+        }
         self.detail_scroll = 0;
     }
 
@@ -2625,6 +2645,7 @@ mod tests {
             filter: Filter::All,
             pending_g: false,
             theme: crate::theme::load(),
+            last_theme_mtime: None,
             metadata_mgr: metadata::MetadataManager::new(),
             active_install: None,
             selected_details: None,
@@ -2924,5 +2945,39 @@ mod tests {
         assert!(matches!(app.mode, Mode::Confirm { .. }));
         app.handle(Intent::ConfirmYes);
         assert!(app.active_install.is_none());
+    }
+
+    #[test]
+    fn search_jumps_to_best_match_from_scrolled_position() {
+        let mut app = test_app();
+        // Scroll down to the bottom (Game Gamma, index 4)
+        app.selected = 4;
+        assert_eq!(app.current().unwrap().title, "Game Gamma");
+
+        // Start search and type "Alpha"
+        app.handle(Intent::Search);
+        assert!(app.searching);
+        app.handle(Intent::Char('A'));
+        app.handle(Intent::Char('l'));
+        app.handle(Intent::Char('p'));
+        app.handle(Intent::Char('h'));
+        app.handle(Intent::Char('a'));
+
+        // Selection must be pushed directly to the best matching game (Game Alpha)
+        assert_eq!(app.current().unwrap().title, "Game Alpha");
+        assert_eq!(app.selected, 1);
+
+        // Cancel clears search
+        app.handle(Intent::Cancel);
+        assert!(!app.searching);
+        assert!(app.search.is_empty());
+    }
+
+    #[test]
+    fn live_theme_reload_updates_state() {
+        let mut app = test_app();
+        app.dirty = false;
+        app.reload_theme();
+        assert!(app.dirty);
     }
 }
