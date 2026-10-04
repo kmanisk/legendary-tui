@@ -1,0 +1,43 @@
+# Maintainer: Manisk Mathew <kmanisk>
+pkgname=legendary-tui
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Fast, keyboard-driven Ratatui TUI frontend for Legendary Epic Games Store CLI"
+arch=('x86_64')
+url="https://github.com/kmanisk/legendary-tui"
+license=('custom')
+depends=('legendary')
+optdepends=(
+    'fzf: interactive directory picker for importing and moving games'
+    'rofi: desktop game launcher integration (Alt+G)'
+    'mangohud: performance overlay support'
+    'gamemode: gaming performance optimization'
+)
+makedepends=('cargo')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/kmanisk/$pkgname/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release --all-targets
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo test --frozen --all-targets
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 "target/release/egs" "$pkgdir/usr/bin/egs"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

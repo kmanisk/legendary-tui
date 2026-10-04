@@ -114,6 +114,9 @@ pub fn gather_candidate_directories(default_path: &str) -> Vec<String> {
 }
 
 pub fn pick_directory_fzf(default_path: &str, title: &str) -> Option<String> {
+    if cfg!(test) || !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return None;
+    }
     let candidates = gather_candidate_directories(default_path);
     let mut child = std::process::Command::new("fzf")
         .args([

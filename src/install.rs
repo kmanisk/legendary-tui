@@ -252,6 +252,197 @@ pub fn parse_progress_line(line: &str, p: &mut InstallProgress) -> bool {
     updated
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerifyProgress {
+    pub app_name: String,
+    pub title: String,
+    pub percentage: f32,
+    pub files_checked: u64,
+    pub total_files: u64,
+    pub bad_files: u64,
+    pub speed_str: String,
+    pub message: String,
+}
+
+impl VerifyProgress {
+    pub fn files_checked_str(&self) -> String {
+        if self.total_files > 0 {
+            format!("{}/{}", self.files_checked, self.total_files)
+        } else {
+            format!("{}", self.files_checked)
+        }
+    }
+}
+
+impl Default for VerifyProgress {
+    fn default() -> Self {
+        Self {
+            app_name: String::new(),
+            title: String::new(),
+            percentage: 0.0,
+            files_checked: 0,
+            total_files: 0,
+            bad_files: 0,
+            speed_str: String::from("0.0 MiB/s"),
+            message: String::from("Starting verification..."),
+        }
+    }
+}
+
+pub struct ActiveVerify {
+    pub app_name: String,
+    pub title: String,
+    pub progress: VerifyProgress,
+    child: Option<Child>,
+    rx: Receiver<VerifyProgress>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ActiveVerify {
+    pub fn start(app_name: &str, title: &str) -> Result<Self, String> {
+        let mut cmd = Command::new("legendary");
+        cmd.args(["verify", app_name]);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("cannot spawn legendary verify: {e}"))?;
+        let stdout = child.stdout.take().ok_or("cannot capture stdout")?;
+        let stderr = child.stderr.take().ok_or("cannot capture stderr")?;
+
+        let (tx, rx) = channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+
+        let app_id = app_name.to_string();
+        let app_title = title.to_string();
+        let cancel_flag = cancelled.clone();
+
+        thread::spawn(move || {
+            let mut prog = VerifyProgress {
+                app_name: app_id,
+                title: app_title,
+                message: "Verifying...".into(),
+                ..Default::default()
+            };
+
+            let (line_tx, line_rx) = channel();
+            let ltx1 = line_tx.clone();
+            thread::spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.split(b'\t').flatten() {
+                    if let Ok(s) = String::from_utf8(line) {
+                        let _ = ltx1.send(s);
+                    }
+                }
+            });
+            thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines().map_while(Result::ok) {
+                    let _ = line_tx.send(line);
+                }
+            });
+
+            while let Ok(line) = line_rx.recv() {
+                if cancel_flag.load(Ordering::SeqCst) {
+                    break;
+                }
+                if parse_verify_line(&line, &mut prog) {
+                    let _ = tx.send(prog.clone());
+                }
+            }
+        });
+
+        let initial = VerifyProgress {
+            app_name: app_name.to_string(),
+            title: title.to_string(),
+            ..Default::default()
+        };
+
+        Ok(Self {
+            app_name: app_name.to_string(),
+            title: title.to_string(),
+            progress: initial,
+            child: Some(child),
+            rx,
+            cancelled,
+        })
+    }
+
+    pub fn poll(&mut self) -> Result<Option<()>, String> {
+        while let Ok(p) = self.rx.try_recv() {
+            self.progress = p;
+        }
+        if let Some(child) = &mut self.child {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if status.success() {
+                        return Ok(Some(()));
+                    } else if self.cancelled.load(Ordering::SeqCst) {
+                        return Err("Verification cancelled.".into());
+                    } else {
+                        return Err(format!(
+                            "Legendary verify failed with code {:?}",
+                            status.code()
+                        ));
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => return Err(format!("verify child wait error: {e}")),
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn cancel(&mut self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+pub fn parse_verify_line(line: &str, p: &mut VerifyProgress) -> bool {
+    let mut updated = false;
+    let t = line.trim();
+    if let Some(idx) = t.find("Verification progress:") {
+        let rest = t[idx + 22..].trim();
+        if let Some(slash) = rest.find('/') {
+            if let Ok(cur) = rest[..slash].trim().parse::<u64>() {
+                p.files_checked = cur;
+                updated = true;
+            }
+            let after_slash = &rest[slash + 1..];
+            if let Some(paren) = after_slash.find('(') {
+                if let Ok(tot) = after_slash[..paren].trim().parse::<u64>() {
+                    p.total_files = tot;
+                    updated = true;
+                }
+                let after_paren = &after_slash[paren + 1..];
+                if let Some(pct_end) = after_paren.find('%') {
+                    if let Ok(pct) = after_paren[..pct_end].trim().parse::<f32>() {
+                        p.percentage = pct;
+                        updated = true;
+                    }
+                }
+            }
+        }
+        if let Some(br_open) = rest.find('[') {
+            if let Some(br_close) = rest[br_open..].find(']') {
+                p.speed_str = rest[br_open + 1..br_open + br_close].trim().to_string();
+                updated = true;
+            }
+        }
+        p.message = "Verifying files...".into();
+    } else if t.contains("finished successfully") {
+        p.percentage = 100.0;
+        p.message = "Verification finished successfully: no corrupted files detected.".into();
+        updated = true;
+    }
+    updated
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,5 +469,17 @@ mod tests {
         assert_eq!(p.status_stage, "Verifying");
         assert_eq!(p.percentage, 27.0);
         assert_eq!(p.speed_str, "45.2 MiB/s");
+
+        let mut vp = VerifyProgress::default();
+        let vl1 = "Verification progress: 142/142 (100.0%) [0.0 MiB/s]";
+        assert!(parse_verify_line(vl1, &mut vp));
+        assert_eq!(vp.files_checked, 142);
+        assert_eq!(vp.total_files, 142);
+        assert_eq!(vp.percentage, 100.0);
+        assert_eq!(vp.speed_str, "0.0 MiB/s");
+
+        let vl2 = "[cli] INFO: Verification finished successfully.";
+        assert!(parse_verify_line(vl2, &mut vp));
+        assert!(vp.message.contains("finished successfully"));
     }
 }

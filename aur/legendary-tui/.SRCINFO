@@ -1,0 +1,17 @@
+pkgbase = legendary-tui
+	pkgdesc = Fast, keyboard-driven Ratatui TUI frontend for Legendary Epic Games Store CLI
+	pkgver = 1.0.0
+	pkgrel = 1
+	url = https://github.com/kmanisk/legendary-tui
+	arch = x86_64
+	license = custom
+	makedepends = cargo
+	depends = legendary
+	optdepends = fzf: interactive directory picker for importing and moving games
+	optdepends = rofi: desktop game launcher integration (Alt+G)
+	optdepends = mangohud: performance overlay support
+	optdepends = gamemode: gaming performance optimization
+	source = legendary-tui-1.0.0.tar.gz::https://github.com/kmanisk/legendary-tui/archive/refs/tags/v1.0.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = legendary-tui

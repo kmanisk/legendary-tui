@@ -1,7 +1,16 @@
 [package]
-name = "egs"
+name = "legendary-tui"
 version = "1.0.0"
 edition = "2021"
+description = "Fast, keyboard-driven Ratatui TUI frontend for Legendary Epic Games Store CLI"
+repository = "https://github.com/kmanisk/legendary-tui"
+readme = "README.md"
+keywords = ["epic-games", "legendary", "tui", "ratatui", "gaming"]
+categories = ["command-line-utilities", "games"]
+
+[[bin]]
+name = "egs"
+path = "src/main.rs"
 
 [dependencies]
 ratatui = "0.30"

@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::input::Intent;
-use crate::install::{ActiveInstall, InstallProgress};
+use crate::install::{ActiveInstall, ActiveVerify, InstallProgress};
 use crate::models::{full_search_score, Game, GameDetails};
 use crate::{cache, config, legendary, metadata, prefix, process, proton, rofi};
 
@@ -42,6 +42,24 @@ pub(crate) enum Op {
     QuitWithCancel,
     ViewInstallScreen,
     CleanStale,
+    CloudSavesMenu(String),
+    DoCloudList(String),
+    ConfirmCloudSync(String),
+    DoCloudSync(String),
+    ConfirmCloudDownload(String),
+    DoCloudDownload(String),
+    ConfirmVerifyGame(String),
+    StartVerifyGame(String),
+    CancelVerify,
+    PromptImportGame(String),
+    ConfirmImportGame { app: String, path: String },
+    DoImportGame { app: String, path: String },
+    ConfirmCleanup,
+    DoCleanup,
+    AccountStatus,
+    Reauth,
+    ConfirmLogout,
+    DoLogout,
     Back,
 }
 
@@ -60,6 +78,8 @@ pub(crate) enum MenuKind {
     BatchInstalled(Vec<String>),
     Downloading(String),
     Queued(String),
+    CloudSaves(String),
+    AccountStatus,
 }
 
 #[derive(Clone, Debug)]
@@ -110,6 +130,8 @@ pub struct App {
     pub(crate) refreshing: bool,
     pub(crate) refresh_rx: Option<std::sync::mpsc::Receiver<LibraryResult>>,
     pub(crate) updates_rx: Option<std::sync::mpsc::Receiver<HashMap<String, String>>>,
+    pub(crate) active_verify: Option<ActiveVerify>,
+    pub(crate) bg_action_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
 }
 
 type LibraryResult = Result<Vec<(String, String)>, String>;
@@ -181,6 +203,8 @@ impl App {
             refreshing: false,
             refresh_rx: None,
             updates_rx: None,
+            active_verify: None,
+            bg_action_rx: None,
         };
         app.set_library(lib);
         app.refresh_installed()?;
@@ -357,6 +381,52 @@ impl App {
         if let Some(mtime) = crate::theme::theme_mtime() {
             if self.last_theme_mtime != Some(mtime) {
                 self.reload_theme();
+                updated = true;
+            }
+        }
+
+        // 6. Poll active verification progress
+        if let Some(vfy) = &mut self.active_verify {
+            match vfy.poll() {
+                Ok(Some(())) => {
+                    let title = vfy.title.clone();
+                    self.say(format!("Verification complete for {title}: files intact."));
+                    self.active_verify = None;
+                    updated = true;
+                }
+                Ok(None) => {
+                    updated = true;
+                }
+                Err(e) => {
+                    self.say(format!("Verification: {e}"));
+                    self.active_verify = None;
+                    updated = true;
+                }
+            }
+        }
+
+        // 7. Poll generic background tasks (cloud sync, cloud download, import, cleanup)
+        if let Some(rx) = &self.bg_action_rx {
+            if let Ok(res) = rx.try_recv() {
+                match res {
+                    Ok(msg) => {
+                        if msg.contains('\n') {
+                            let mut lines: Vec<String> =
+                                msg.lines().map(|s| s.to_string()).collect();
+                            lines.push("".into());
+                            lines.push("[Enter] or [Esc] to return".into());
+                            self.mode = Mode::Confirm {
+                                lines,
+                                op: Op::Back,
+                            };
+                        } else {
+                            self.say(msg);
+                        }
+                    }
+                    Err(err) => self.say(format!("Operation failed: {err}")),
+                }
+                self.bg_action_rx = None;
+                let _ = self.refresh_installed();
                 updated = true;
             }
         }
@@ -1279,10 +1349,252 @@ impl App {
                     self.say(msg);
                 }
             }
+            Op::CloudSavesMenu(app) => {
+                self.mode = Mode::Menu(self.cloud_saves_menu(&app));
+            }
+            Op::DoCloudList(app) => {
+                let title = self.title_of(&app);
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.bg_action_rx = Some(rx);
+                self.say(format!("Checking cloud saves for {title}..."));
+                std::thread::spawn(move || {
+                    let res = crate::legendary::cloud_list_saves(&app).map(|saves| {
+                        if saves.is_empty() {
+                            format!("No cloud saves found for {title}.")
+                        } else {
+                            format!("Cloud saves for {title}:\n{}", saves.join("\n"))
+                        }
+                    });
+                    let _ = tx.send(res);
+                });
+            }
+            Op::ConfirmCloudSync(app) => {
+                let title = self.title_of(&app);
+                self.mode = Mode::Confirm {
+                    lines: vec![
+                        "Sync cloud saves for:".into(),
+                        "".into(),
+                        format!("Game: {title}"),
+                        "".into(),
+                        "Legendary will upload newer local saves or download newer cloud saves."
+                            .into(),
+                        "".into(),
+                        "Continue? [y/N]".into(),
+                    ],
+                    op: Op::DoCloudSync(app),
+                };
+            }
+            Op::DoCloudSync(app) => {
+                let title = self.title_of(&app);
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.bg_action_rx = Some(rx);
+                self.say(format!("Syncing cloud saves for {title}..."));
+                std::thread::spawn(move || {
+                    let res = crate::legendary::cloud_sync_saves(&app);
+                    let _ = tx.send(res);
+                });
+            }
+            Op::ConfirmCloudDownload(app) => {
+                let title = self.title_of(&app);
+                self.mode = Mode::Confirm {
+                    lines: vec![
+                        "Download cloud saves for:".into(),
+                        "".into(),
+                        format!("Game: {title}"),
+                        "".into(),
+                        "Warning: This will overwrite local save files with cloud versions.".into(),
+                        "".into(),
+                        "Continue? [y/N]".into(),
+                    ],
+                    op: Op::DoCloudDownload(app),
+                };
+            }
+            Op::DoCloudDownload(app) => {
+                let title = self.title_of(&app);
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.bg_action_rx = Some(rx);
+                self.say(format!("Downloading cloud saves for {title}..."));
+                std::thread::spawn(move || {
+                    let res = crate::legendary::cloud_download_saves(&app);
+                    let _ = tx.send(res);
+                });
+            }
+            Op::ConfirmVerifyGame(app) => {
+                let title = self.title_of(&app);
+                self.mode = Mode::Confirm {
+                    lines: vec![
+                        "Verify game files?".into(),
+                        "".into(),
+                        format!("Game: {title}"),
+                        "".into(),
+                        "Legendary will check all installed chunks against manifest.".into(),
+                        "This may take several minutes depending on disk speed.".into(),
+                        "".into(),
+                        "Continue? [y/N]".into(),
+                    ],
+                    op: Op::StartVerifyGame(app),
+                };
+            }
+            Op::StartVerifyGame(app) => {
+                let title = self.title_of(&app);
+                match ActiveVerify::start(&app, &title) {
+                    Ok(vfy) => {
+                        self.active_verify = Some(vfy);
+                        self.say(format!("Verification started for {title}..."));
+                    }
+                    Err(e) => {
+                        self.say(format!("Failed to start verification: {e}"));
+                    }
+                }
+            }
+            Op::CancelVerify => {
+                if let Some(mut vfy) = self.active_verify.take() {
+                    vfy.cancel();
+                    self.say("Verification cancelled.");
+                }
+            }
+            Op::PromptImportGame(app) => {
+                self.prompt_import_game(app);
+            }
+            Op::ConfirmImportGame { app, path } => {
+                let title = self.title_of(&app);
+                self.mode = Mode::Confirm {
+                    lines: vec![
+                        "Import this existing installation?".into(),
+                        "".into(),
+                        format!("Game:      {title} ({app})"),
+                        format!("Directory: {path}"),
+                        "".into(),
+                        "Legendary metadata will be created/updated.".into(),
+                        "Game files will NOT be deleted or overwritten.".into(),
+                        "".into(),
+                        "Continue? [y/N]".into(),
+                    ],
+                    op: Op::DoImportGame { app, path },
+                };
+            }
+            Op::DoImportGame { app, path } => {
+                let title = self.title_of(&app);
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.bg_action_rx = Some(rx);
+                self.say(format!("Importing {title} from {path}..."));
+                std::thread::spawn(move || {
+                    let res = crate::legendary::import_game(&app, &path);
+                    let _ = tx.send(res);
+                });
+            }
+            Op::ConfirmCleanup => {
+                self.mode = Mode::Confirm {
+                    lines: vec![
+                        "Legendary Cleanup".into(),
+                        "".into(),
+                        "Legendary will clean its temporary/cache data, stale manifests,".into(),
+                        "and old metadata files.".into(),
+                        "".into(),
+                        "Proceed with cleanup? [y/N]".into(),
+                    ],
+                    op: Op::DoCleanup,
+                };
+            }
+            Op::DoCleanup => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.bg_action_rx = Some(rx);
+                self.say("Cleaning up Legendary temporary and cache files...");
+                std::thread::spawn(move || {
+                    let res = crate::legendary::cleanup();
+                    let _ = tx.send(res);
+                });
+            }
+            Op::AccountStatus => match crate::legendary::account_status() {
+                Ok(st) => {
+                    self.mode = Mode::Menu(self.account_status_menu(&st));
+                }
+                Err(e) => {
+                    self.say(format!("Failed to retrieve account status: {e}"));
+                }
+            },
+            Op::Reauth => {
+                let guard = match process::SuspendGuard::suspend() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        self.say(format!("terminal suspend failed: {e}"));
+                        return;
+                    }
+                };
+                let ok = process::run_foreground(&["legendary", "auth"]);
+                guard.disarm();
+                self.suspended = true;
+                if ok {
+                    self.say("Authentication session updated.");
+                    let _ = self.refresh_installed();
+                } else {
+                    self.say("Authentication was cancelled or failed.");
+                }
+            }
+            Op::ConfirmLogout => {
+                self.mode = Mode::Confirm {
+                    lines: vec![
+                        "Log out of Epic Games Store?".into(),
+                        "".into(),
+                        "This will delete your saved authentication credentials.".into(),
+                        "".into(),
+                        "Continue? [y/N]".into(),
+                    ],
+                    op: Op::DoLogout,
+                };
+            }
+            Op::DoLogout => match crate::legendary::logout() {
+                Ok(msg) => {
+                    self.say(msg);
+                    self.games.clear();
+                    self.filtered.clear();
+                }
+                Err(e) => self.say(format!("Logout failed: {e}")),
+            },
             Op::SetPerGamePrefix(_) | Op::SetPerGameLaunchArgs(_) => {}
             Op::Back => {}
         }
         self.dirty = true;
+    }
+
+    fn prompt_import_game(&mut self, app: String) {
+        if app.is_empty() {
+            self.mode = Mode::Input {
+                title: "Enter Epic App Name or ID to import:".to_string(),
+                buf: String::new(),
+                op: Op::PromptImportGame(String::new()),
+            };
+        } else {
+            let title = self.title_of(&app);
+            let guard = match process::SuspendGuard::suspend() {
+                Ok(g) => g,
+                Err(e) => {
+                    self.say(format!("terminal suspend failed: {e}"));
+                    return;
+                }
+            };
+            let picked = crate::filesystem::pick_directory_fzf(
+                &self.cfg.default_install_path,
+                &format!("Select install directory for {title}"),
+            );
+            guard.disarm();
+            self.suspended = true;
+
+            if let Some(path) = picked {
+                let path = path.trim().to_string();
+                if !path.is_empty() {
+                    self.execute(Op::ConfirmImportGame { app, path });
+                } else {
+                    self.say("Import cancelled (empty path).");
+                }
+            } else {
+                self.mode = Mode::Input {
+                    title: format!("Install directory for {title}:"),
+                    buf: self.cfg.default_install_path.clone(),
+                    op: Op::PromptImportGame(app),
+                };
+            }
+        }
     }
 
     // ---- Menus ------------------------------------------------------------
@@ -1391,7 +1703,15 @@ impl App {
                 Op::MoveGame(app.to_string()),
             ),
             (
-                "Update / Verify Installation".to_string(),
+                "Cloud Saves (c)".to_string(),
+                Op::CloudSavesMenu(app.to_string()),
+            ),
+            (
+                "Verify Game Files (v)".to_string(),
+                Op::ConfirmVerifyGame(app.to_string()),
+            ),
+            (
+                "Check for updates (u)".to_string(),
                 Op::Update(app.to_string()),
             ),
             (
@@ -1417,6 +1737,71 @@ impl App {
             items,
             idx: 0,
             kind: MenuKind::Installed(app.to_string()),
+        }
+    }
+
+    fn cloud_saves_menu(&self, app: &str) -> Menu {
+        Menu {
+            title: format!("Cloud Saves — {}", self.title_of(app)),
+            items: vec![
+                (
+                    "[l] List cloud saves".to_string(),
+                    Op::DoCloudList(app.to_string()),
+                ),
+                (
+                    "[s] Sync saves (two-way)".to_string(),
+                    Op::ConfirmCloudSync(app.to_string()),
+                ),
+                (
+                    "[d] Download cloud saves (overwrite local)".to_string(),
+                    Op::ConfirmCloudDownload(app.to_string()),
+                ),
+            ],
+            idx: 0,
+            kind: MenuKind::CloudSaves(app.to_string()),
+        }
+    }
+
+    fn account_status_menu(&self, status: &crate::legendary::AccountStatus) -> Menu {
+        let acc_str = status.account.as_deref().unwrap_or("Not logged in");
+        let avail_str = status
+            .games_available
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
+        let inst_str = status
+            .games_installed
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
+        let mut items = vec![
+            (format!("Account:           {acc_str}"), Op::Back),
+            (format!("Available games:   {avail_str}"), Op::Back),
+            (format!("Installed games:   {inst_str}"), Op::Back),
+        ];
+        if let Some(sync) = status.egl_sync_enabled {
+            items.push((
+                format!(
+                    "EGL Sync:          {}",
+                    if sync { "Enabled" } else { "Disabled" }
+                ),
+                Op::Back,
+            ));
+        }
+        if let Some(cfg) = &status.config_directory {
+            items.push((format!("Config dir:        {cfg}"), Op::Back));
+        }
+        items.push((
+            "Re-authenticate with Epic Games Store".to_string(),
+            Op::Reauth,
+        ));
+        items.push((
+            "Log out / Delete saved credentials".to_string(),
+            Op::ConfirmLogout,
+        ));
+        Menu {
+            title: "Epic Games Account Status".to_string(),
+            items,
+            idx: 0,
+            kind: MenuKind::AccountStatus,
         }
     }
 
@@ -1478,12 +1863,24 @@ impl App {
                         "Set per-game install location".to_string()
                     },
                     if is_installed {
-                        Op::MoveGame(sel_app)
+                        Op::MoveGame(sel_app.clone())
                     } else {
-                        Op::SetPerGamePath(sel_app)
+                        Op::SetPerGamePath(sel_app.clone())
                     },
                 ),
                 ("Clean stale Alt+G entries".to_string(), Op::CleanStale),
+                (
+                    "Import existing game installation (i)".to_string(),
+                    Op::PromptImportGame(sel_app),
+                ),
+                (
+                    "Legendary cleanup (cache & temporary files)".to_string(),
+                    Op::ConfirmCleanup,
+                ),
+                (
+                    "Epic Games account & login status".to_string(),
+                    Op::AccountStatus,
+                ),
             ],
             idx: 0,
             kind: MenuKind::Settings,
@@ -1649,6 +2046,10 @@ impl App {
                 let fresh = self.settings_menu();
                 (fresh.title, fresh.items)
             }
+            MenuKind::CloudSaves(ref app) => {
+                let fresh = self.cloud_saves_menu(app);
+                (fresh.title, fresh.items)
+            }
             _ => return,
         };
         if let Mode::Menu(ref mut m) = self.mode {
@@ -1735,7 +2136,42 @@ impl App {
             }
         }
 
-        if let Mode::Menu(_) = self.mode {
+        if let Mode::Menu(ref m) = self.mode {
+            if let MenuKind::CloudSaves(ref app) = m.kind {
+                match intent {
+                    Intent::Char('l' | 'L') => {
+                        let app = app.clone();
+                        self.execute(Op::DoCloudList(app));
+                        return;
+                    }
+                    Intent::Char('s' | 'S') => {
+                        let app = app.clone();
+                        self.execute(Op::ConfirmCloudSync(app));
+                        return;
+                    }
+                    Intent::Char('d' | 'D') => {
+                        let app = app.clone();
+                        self.execute(Op::ConfirmCloudDownload(app));
+                        return;
+                    }
+                    _ => {}
+                }
+            } else if let MenuKind::Installed(ref app) = m.kind {
+                match intent {
+                    Intent::CloudSaves | Intent::Char('c' | 'C') => {
+                        let app = app.clone();
+                        self.execute(Op::CloudSavesMenu(app));
+                        return;
+                    }
+                    Intent::VerifyGame | Intent::Char('v' | 'V') => {
+                        let app = app.clone();
+                        self.execute(Op::ConfirmVerifyGame(app));
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
             match intent {
                 Intent::Up => {
                     if let Some(m) = self.menu_mut() {
@@ -1833,6 +2269,37 @@ impl App {
                 Some(a) => self.start_in_app_install(&a),
                 None => self.say("Select an installed game first."),
             },
+            Intent::CloudSaves => {
+                let is_cur_downloading = self
+                    .current()
+                    .map(|g| {
+                        self.active_install.as_ref().map(|i| &i.app_name) == Some(&g.app_name)
+                            || self.install_queue.contains(&g.app_name)
+                    })
+                    .unwrap_or(false);
+
+                if is_cur_downloading {
+                    self.cancel_download_or_dequeue();
+                } else if let Some(app) = self.current().map(|g| g.app_name.clone()) {
+                    self.mode = Mode::Menu(self.cloud_saves_menu(&app));
+                } else {
+                    self.say("Select a game first.");
+                }
+            }
+            Intent::VerifyGame => {
+                if let Some(app) = self.installed_or_msg() {
+                    self.execute(Op::ConfirmVerifyGame(app));
+                } else {
+                    self.say("Select an installed game to verify.");
+                }
+            }
+            Intent::ImportGame => {
+                let initial = self
+                    .current()
+                    .map(|g| g.app_name.clone())
+                    .unwrap_or_default();
+                self.prompt_import_game(initial);
+            }
             Intent::DeleteMenu => self.quick_delete_menu(),
             Intent::Cancel => match self.mode {
                 Mode::Library => {
@@ -2350,6 +2817,18 @@ impl App {
                         }
                         self.mode = Mode::Library;
                     }
+                    Op::PromptImportGame(app) => {
+                        let val = value.trim().to_string();
+                        if val.is_empty() {
+                            self.say("Import cancelled (empty input).");
+                            self.mode = Mode::Library;
+                        } else if app.is_empty() {
+                            self.prompt_import_game(val);
+                        } else {
+                            self.mode = Mode::Library;
+                            self.execute(Op::ConfirmImportGame { app, path: val });
+                        }
+                    }
                     _ => self.mode = Mode::Library,
                 }
                 return;
@@ -2462,7 +2941,19 @@ impl App {
             };
             return;
         }
-        self.say("No active download or queued game to cancel.");
+        if let Some(vfy) = &self.active_verify {
+            let title = vfy.title.clone();
+            self.mode = Mode::Confirm {
+                lines: vec![
+                    format!("Cancel verification of {title}?"),
+                    "".into(),
+                    "The file verification process will be stopped.".into(),
+                ],
+                op: Op::CancelVerify,
+            };
+            return;
+        }
+        self.say("No active download, queue, or verification to cancel.");
     }
 
     // ---- View Helpers for ui.rs -------------------------------------------
@@ -2654,6 +3145,8 @@ mod tests {
             refreshing: false,
             refresh_rx: None,
             updates_rx: None,
+            active_verify: None,
+            bg_action_rx: None,
         };
         app.apply_filter();
         app.update_selected_details();
@@ -2979,5 +3472,116 @@ mod tests {
         app.dirty = false;
         app.reload_theme();
         assert!(app.dirty);
+    }
+
+    #[test]
+    fn cloud_saves_menu_and_actions() {
+        let mut app = test_app();
+        app.selected = 1; // "app1"
+        app.handle(Intent::CloudSaves);
+        assert!(matches!(app.mode, Mode::Menu(ref m) if matches!(m.kind, MenuKind::CloudSaves(_))));
+
+        if let Mode::Menu(ref m) = app.mode {
+            assert_eq!(m.items.len(), 3);
+            assert!(m
+                .items
+                .iter()
+                .any(|(lbl, _)| lbl.contains("List cloud saves")));
+            assert!(m.items.iter().any(|(lbl, _)| lbl.contains("Sync saves")));
+            assert!(m
+                .items
+                .iter()
+                .any(|(lbl, _)| lbl.contains("Download cloud saves")));
+        }
+
+        // Press 's' triggers ConfirmCloudSync
+        app.handle(Intent::Char('s'));
+        assert!(
+            matches!(app.mode, Mode::Confirm { ref op, .. } if matches!(op, Op::DoCloudSync(_)))
+        );
+
+        // Cancel returns to library
+        app.handle(Intent::Cancel);
+        assert!(matches!(app.mode, Mode::Library));
+    }
+
+    #[test]
+    fn verify_game_confirmation_flow() {
+        let mut app = test_app();
+        app.selected = 3; // "app1" is uninstalled
+        app.handle(Intent::VerifyGame);
+        // Uninstalled game shouldn't open verify confirm
+        assert!(matches!(app.mode, Mode::Library));
+        assert!(app.status.contains("Select an installed game"));
+
+        // Select installed game "app2" (index 1)
+        app.selected = 1;
+        app.handle(Intent::VerifyGame);
+        assert!(
+            matches!(app.mode, Mode::Confirm { ref op, .. } if matches!(op, Op::StartVerifyGame(_)))
+        );
+
+        // Esc cancels
+        app.handle(Intent::Cancel);
+        assert!(matches!(app.mode, Mode::Library));
+    }
+
+    #[test]
+    fn import_game_prompt_and_settings() {
+        let mut app = test_app();
+        // Trigger import from library
+        app.selected = 1;
+        app.handle(Intent::ImportGame);
+        // If directory fzf returns None in test env, it falls back to input dialog
+        assert!(
+            matches!(app.mode, Mode::Input { ref op, .. } if matches!(op, Op::PromptImportGame(_)))
+        );
+
+        // Submitting path enters confirmation
+        app.handle(Intent::Enter);
+        assert!(
+            matches!(app.mode, Mode::Confirm { ref op, .. } if matches!(op, Op::DoImportGame { .. }))
+        );
+
+        // Cancel returns to library
+        app.handle(Intent::Cancel);
+        assert!(matches!(app.mode, Mode::Library));
+    }
+
+    #[test]
+    fn cleanup_and_account_status_settings() {
+        let mut app = test_app();
+        let menu = app.settings_menu();
+        assert!(menu
+            .items
+            .iter()
+            .any(|(lbl, op)| lbl.contains("cleanup") && matches!(op, Op::ConfirmCleanup)));
+        assert!(menu
+            .items
+            .iter()
+            .any(|(lbl, op)| lbl.contains("account") && matches!(op, Op::AccountStatus)));
+
+        // Execute cleanup confirmation
+        app.execute(Op::ConfirmCleanup);
+        assert!(matches!(app.mode, Mode::Confirm { ref op, .. } if matches!(op, Op::DoCleanup)));
+
+        // Test account status menu helper
+        let status = crate::legendary::AccountStatus {
+            account: Some("TestUser".into()),
+            games_available: Some(42),
+            games_installed: Some(3),
+            egl_sync_enabled: Some(true),
+            config_directory: Some("/home/test/.config/legendary".into()),
+        };
+        let acc_menu = app.account_status_menu(&status);
+        assert!(acc_menu
+            .items
+            .iter()
+            .any(|(lbl, _)| lbl.contains("TestUser")));
+        assert!(acc_menu.items.iter().any(|(lbl, _)| lbl.contains("42")));
+        assert!(acc_menu
+            .items
+            .iter()
+            .any(|(lbl, _)| lbl.contains("Enabled")));
     }
 }

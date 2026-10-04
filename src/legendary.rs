@@ -158,3 +158,178 @@ pub fn uninstall_game(app_name: &str) -> Result<(), String> {
 
     Ok(())
 }
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct AccountStatus {
+    pub account: Option<String>,
+    pub games_available: Option<usize>,
+    pub games_installed: Option<usize>,
+    pub egl_sync_enabled: Option<bool>,
+    pub config_directory: Option<String>,
+}
+
+/// Retrieve account status safely via `legendary status --json`.
+pub fn account_status() -> Result<AccountStatus, String> {
+    let out = Command::new("legendary")
+        .args(["status", "--json"])
+        .output()
+        .map_err(|e| format!("cannot run legendary: {e}"))?;
+    if !out.status.success() {
+        return Err("Not logged in or legendary status failed".into());
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if let Some(start) = stdout.find('{') {
+        let json_str = &stdout[start..];
+        let status: AccountStatus =
+            serde_json::from_str(json_str).map_err(|e| format!("status JSON parse error: {e}"))?;
+        return Ok(status);
+    }
+    Err("No JSON returned from legendary status".into())
+}
+
+/// List available cloud save manifests for a game.
+pub fn cloud_list_saves(app_name: &str) -> Result<Vec<String>, String> {
+    let out = Command::new("legendary")
+        .args(["list-saves", app_name])
+        .output()
+        .map_err(|e| format!("cannot run legendary: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut saves = Vec::new();
+    for line in stdout.lines() {
+        let t = line.trim();
+        if t.starts_with('+') || t.starts_with('-') {
+            saves.push(t.to_string());
+        }
+    }
+    Ok(saves)
+}
+
+/// Synchronize cloud saves (two-way sync) for a game.
+pub fn cloud_sync_saves(app_name: &str) -> Result<String, String> {
+    let out = Command::new("legendary")
+        .args(["sync-saves", "-y", app_name])
+        .output()
+        .map_err(|e| format!("cannot run legendary: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success()
+        || stdout.contains("ERROR:")
+        || stderr.contains("ERROR:")
+        || stderr.contains("CRITICAL:")
+    {
+        let err = if !stderr.trim().is_empty() {
+            stderr.trim()
+        } else {
+            stdout.trim()
+        };
+        return Err(err.to_string());
+    }
+    let msg = if !stdout.trim().is_empty() {
+        stdout.trim()
+    } else {
+        "Cloud saves synchronized successfully."
+    };
+    Ok(msg.to_string())
+}
+
+/// Download cloud saves from Epic servers to local disk.
+pub fn cloud_download_saves(app_name: &str) -> Result<String, String> {
+    let out = Command::new("legendary")
+        .args(["download-saves", "-y", app_name])
+        .output()
+        .map_err(|e| format!("cannot run legendary: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success()
+        || stdout.contains("ERROR:")
+        || stderr.contains("ERROR:")
+        || stderr.contains("CRITICAL:")
+    {
+        let err = if !stderr.trim().is_empty() {
+            stderr.trim()
+        } else {
+            stdout.trim()
+        };
+        return Err(err.to_string());
+    }
+    Ok("Cloud saves downloaded successfully.".into())
+}
+
+/// Run file verification for an installed game.
+#[allow(dead_code)]
+pub fn verify_game(app_name: &str) -> Result<String, String> {
+    let out = Command::new("legendary")
+        .args(["verify", app_name])
+        .output()
+        .map_err(|e| format!("cannot run legendary: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() || stdout.contains("ERROR:") || stderr.contains("ERROR:") {
+        let err = if !stderr.trim().is_empty() {
+            stderr.trim()
+        } else {
+            stdout.trim()
+        };
+        return Err(err.to_string());
+    }
+    if stdout.contains("finished successfully") || stderr.contains("finished successfully") {
+        Ok("Verification finished successfully: no corrupted files detected.".into())
+    } else {
+        Ok("Verification complete.".into())
+    }
+}
+
+/// Import an existing installed game directory into Legendary.
+pub fn import_game(app_name: &str, path: &str) -> Result<String, String> {
+    let out = Command::new("legendary")
+        .args(["import", app_name, path, "--with-dlcs"])
+        .output()
+        .map_err(|e| format!("cannot run legendary: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() || stdout.contains("ERROR:") || stderr.contains("ERROR:") {
+        let err = if !stderr.trim().is_empty() {
+            stderr.trim()
+        } else {
+            stdout.trim()
+        };
+        return Err(err.to_string());
+    }
+    Ok(format!("Successfully imported game from {path}."))
+}
+
+/// Clean up temporary chunks, stale manifests, and download cache via Legendary.
+pub fn cleanup() -> Result<String, String> {
+    let out = Command::new("legendary")
+        .args(["-y", "cleanup"])
+        .output()
+        .map_err(|e| format!("cannot run legendary: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        let err = if !stderr.trim().is_empty() {
+            stderr.trim()
+        } else {
+            stdout.trim()
+        };
+        return Err(err.to_string());
+    }
+    for line in stderr.lines().chain(stdout.lines()) {
+        if line.contains("Cleanup complete") {
+            return Ok(line.trim().to_string());
+        }
+    }
+    Ok("Cleanup finished successfully.".into())
+}
+
+/// Log out of Epic Games Store (remove stored session).
+pub fn logout() -> Result<String, String> {
+    let out = Command::new("legendary")
+        .args(["auth", "--delete"])
+        .output()
+        .map_err(|e| format!("cannot run legendary: {e}"))?;
+    if !out.status.success() {
+        return Err("Failed to remove authentication session.".into());
+    }
+    Ok("Logged out of Epic Games Store.".into())
+}

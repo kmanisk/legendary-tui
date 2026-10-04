@@ -86,6 +86,19 @@ pub fn draw(f: &mut Frame, app: &App) {
                 .fg(app.theme.cyan)
                 .add_modifier(Modifier::BOLD),
         ));
+    } else if let Some(vfy) = &app.active_verify {
+        header_spans.push(Span::styled(
+            format!(
+                "   [✓ {} {:.1}% • {} checked • {}]",
+                vfy.title,
+                vfy.progress.percentage,
+                vfy.progress.files_checked_str(),
+                vfy.progress.speed_str
+            ),
+            Style::default()
+                .fg(app.theme.green)
+                .add_modifier(Modifier::BOLD),
+        ));
     } else if !app.install_queue.is_empty() {
         header_spans.push(Span::styled(
             format!("   [{} games queued for download]", app.install_queue.len()),
@@ -174,17 +187,26 @@ pub fn draw(f: &mut Frame, app: &App) {
 
         if is_installed {
             spans.push(Span::styled("Enter", key_style));
-            spans.push(Span::styled(" Launch Options  ", fg_style));
+            spans.push(Span::styled(" Options  ", fg_style));
+            spans.push(Span::styled("c", key_style));
+            spans.push(Span::styled(" Saves  ", fg_style));
+            spans.push(Span::styled("v", key_style));
+            spans.push(Span::styled(" Verify  ", fg_style));
             spans.push(Span::styled("d", key_style));
             spans.push(Span::styled(" Delete  ", fg_style));
         } else {
             spans.push(Span::styled("Enter", key_style));
             spans.push(Span::styled(" Install  ", fg_style));
+            spans.push(Span::styled("i", key_style));
+            spans.push(Span::styled(" Import  ", fg_style));
         }
 
-        if app.active_install.is_some() || !app.install_queue.is_empty() {
-            spans.push(Span::styled("c", key_style));
-            spans.push(Span::styled(" Cancel/Dequeue  ", fg_style));
+        if app.active_install.is_some()
+            || !app.install_queue.is_empty()
+            || app.active_verify.is_some()
+        {
+            spans.push(Span::styled("x", key_style));
+            spans.push(Span::styled(" Cancel  ", fg_style));
         }
 
         spans.extend(vec![
@@ -716,6 +738,76 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                     lines.push(Line::from(""));
                 }
 
+                if let Some(vfy) = &app.active_verify {
+                    if vfy.app_name == g.app_name {
+                        lines.push(Line::from(vec![
+                            Span::styled("Status:       ", Style::default().fg(app.theme.cyan)),
+                            Span::styled(
+                                format!("Verifying ({:.1}%)", vfy.progress.percentage),
+                                Style::default()
+                                    .fg(app.theme.green)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
+
+                        let bar_width = 24;
+                        let filled =
+                            ((vfy.progress.percentage / 100.0) * bar_width as f32).round() as usize;
+                        let filled = filled.min(bar_width);
+                        let empty = bar_width - filled;
+                        let bar_str = format!(
+                            "[{}{}] {:.1}%",
+                            "█".repeat(filled),
+                            "░".repeat(empty),
+                            vfy.progress.percentage
+                        );
+                        lines.push(Line::from(vec![
+                            Span::styled("Progress:     ", Style::default().fg(app.theme.cyan)),
+                            Span::styled(
+                                bar_str,
+                                Style::default()
+                                    .fg(app.theme.green)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
+
+                        lines.push(Line::from(vec![
+                            Span::styled("Speed / File: ", Style::default().fg(app.theme.cyan)),
+                            Span::styled(
+                                format!(
+                                    "{} • Files: {}",
+                                    vfy.progress.speed_str,
+                                    vfy.progress.files_checked_str()
+                                ),
+                                Style::default().fg(app.theme.fg),
+                            ),
+                        ]));
+
+                        if vfy.progress.bad_files > 0 {
+                            lines.push(Line::from(vec![
+                                Span::styled("Bad files:    ", Style::default().fg(app.theme.red)),
+                                Span::styled(
+                                    format!("{}", vfy.progress.bad_files),
+                                    Style::default()
+                                        .fg(app.theme.red)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]));
+                        }
+
+                        lines.push(Line::from(vec![
+                            Span::styled("Actions:      ", Style::default().fg(app.theme.cyan)),
+                            Span::styled(
+                                "[x] Cancel Verification",
+                                Style::default()
+                                    .fg(app.theme.red)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
+                        lines.push(Line::from(""));
+                    }
+                }
+
                 // ProtonDB Rating
                 let (pdb_lbl, pdb_val) =
                     protondb_badge(details.and_then(|d| d.protondb_tier.as_deref()), &app.theme);
@@ -982,6 +1074,13 @@ fn draw_menu_popup(f: &mut Frame, app: &App, area: Rect) {
 
     let mut state = ratatui::widgets::ListState::default();
     state.select(Some(idx));
+    let bottom_hint = match app.mode() {
+        AppMode::Menu(m) if matches!(m.kind, crate::app::MenuKind::CloudSaves(_)) => {
+            " [l] List  [s] Sync  [d] Download  [Enter] Select  [Esc] Back "
+        }
+        _ => " [h/l · ←/→] Adjust  [Enter] Select  [Esc] Back ",
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.accent))
@@ -993,7 +1092,7 @@ fn draw_menu_popup(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Span::styled(
-            " [h/l · ←/→] Adjust  [Enter] Select  [Esc] Back ",
+            bottom_hint,
             Style::default().fg(app.theme.cyan),
         ));
 
@@ -1094,7 +1193,7 @@ fn draw_details_popup(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_help_popup(f: &mut Frame, app: &App, area: Rect) {
-    let r = centered(area, 64.min(area.width - 4), 23.min(area.height - 4));
+    let r = centered(area, 68.min(area.width - 4), 27.min(area.height - 2));
     f.render_widget(Clear, r);
     let text = vec![
         Line::from(vec![
@@ -1130,12 +1229,28 @@ fn draw_help_popup(f: &mut Frame, app: &App, area: Rect) {
             Span::raw("Adjust/toggle in menus (MangoHud, LSFG, etc)"),
         ]),
         Line::from(vec![
+            Span::styled("c                 ", Style::default().fg(app.theme.cyan)),
+            Span::raw("Cloud Saves (list, sync, download)"),
+        ]),
+        Line::from(vec![
+            Span::styled("v                 ", Style::default().fg(app.theme.cyan)),
+            Span::raw("Verify game files against manifest"),
+        ]),
+        Line::from(vec![
+            Span::styled("i                 ", Style::default().fg(app.theme.cyan)),
+            Span::raw("Import existing game installation"),
+        ]),
+        Line::from(vec![
             Span::styled("u                 ", Style::default().fg(app.theme.cyan)),
-            Span::raw("Update / Repair selected"),
+            Span::raw("Check for updates / update selected"),
         ]),
         Line::from(vec![
             Span::styled("d                 ", Style::default().fg(app.theme.cyan)),
             Span::raw("Delete game menu (installed)"),
+        ]),
+        Line::from(vec![
+            Span::styled("x                 ", Style::default().fg(app.theme.cyan)),
+            Span::raw("Cancel active download, queue, or verification"),
         ]),
         Line::from(vec![
             Span::styled("/                 ", Style::default().fg(app.theme.cyan)),
@@ -1147,7 +1262,7 @@ fn draw_help_popup(f: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("s                 ", Style::default().fg(app.theme.cyan)),
-            Span::raw("Settings (Proton, GameMode, LSFG, paths)"),
+            Span::raw("Settings (Cleanup, Account, Proton, LSFG)"),
         ]),
         Line::from(vec![
             Span::styled("?                 ", Style::default().fg(app.theme.cyan)),
