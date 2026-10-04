@@ -63,15 +63,44 @@ pub fn draw(f: &mut Frame, app: &App) {
             app.selected_games.len()
         )
     };
-    let header = Paragraph::new(vec![Line::from(vec![
+    let mut header_spans = vec![
         Span::styled(" Epic Games ", title_style(app)),
         Span::styled(count_text, Style::default().fg(app.theme.fg)),
-        Span::styled(
+    ];
+    if let Some(inst) = &app.active_install {
+        let q_str = if app.install_queue.is_empty() {
+            String::new()
+        } else {
+            format!(" (+{} queued)", app.install_queue.len())
+        };
+        header_spans.push(Span::styled(
+            format!(
+                "   [↓ {} {:.1}% • {} • ETA {}]{}",
+                inst.title,
+                inst.progress.percentage,
+                inst.progress.speed_str,
+                inst.progress.eta_str,
+                q_str
+            ),
+            Style::default()
+                .fg(app.theme.cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if !app.install_queue.is_empty() {
+        header_spans.push(Span::styled(
+            format!("   [{} games queued for download]", app.install_queue.len()),
+            Style::default()
+                .fg(app.theme.yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if !app.status.is_empty() {
+        header_spans.push(Span::styled(
             format!("      {}", app.status),
             Style::default().fg(app.theme.yellow),
-        ),
-    ])])
-    .block(
+        ));
+    }
+    let header = Paragraph::new(vec![Line::from(header_spans)]).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(app.theme.muted))
@@ -139,6 +168,11 @@ pub fn draw(f: &mut Frame, app: &App) {
         } else {
             spans.push(Span::styled("Enter", key_style));
             spans.push(Span::styled(" Install  ", fg_style));
+        }
+
+        if app.active_install.is_some() || !app.install_queue.is_empty() {
+            spans.push(Span::styled("c", key_style));
+            spans.push(Span::styled(" Cancel/Dequeue  ", fg_style));
         }
 
         spans.extend(vec![
@@ -264,7 +298,42 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
                     Span::styled(inst_str, inst_style),
                     Span::styled(g.title.clone(), title_style),
                 ];
-                if g.needs_update {
+                let is_active_dl =
+                    app.active_install.as_ref().map(|i| &i.app_name) == Some(&g.app_name);
+                let queue_pos = app.install_queue.iter().position(|q| q == &g.app_name);
+
+                if is_active_dl {
+                    let perc = app
+                        .active_install
+                        .as_ref()
+                        .map(|i| i.progress.percentage)
+                        .unwrap_or(0.0);
+                    spans.push(Span::styled(
+                        format!(" [↓ {:.0}%]", perc),
+                        if is_sel {
+                            Style::default()
+                                .fg(app.theme.on_accent)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                                .fg(app.theme.cyan)
+                                .add_modifier(Modifier::BOLD)
+                        },
+                    ));
+                } else if let Some(pos) = queue_pos {
+                    spans.push(Span::styled(
+                        format!(" [QUEUED #{}]", pos + 1),
+                        if is_sel {
+                            Style::default()
+                                .fg(app.theme.on_accent)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                                .fg(app.theme.yellow)
+                                .add_modifier(Modifier::BOLD)
+                        },
+                    ));
+                } else if g.needs_update {
                     spans.push(Span::styled(
                         " [UPDATE]",
                         if is_sel {
@@ -367,6 +436,16 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                             .fg(app.theme.yellow)
                             .add_modifier(Modifier::BOLD),
                     ));
+                }
+                if let Some(inst) = &app.active_install {
+                    if inst.app_name == g.app_name {
+                        state_spans.push(Span::styled(
+                            format!(" [UPDATING: {:.1}%]", inst.progress.percentage),
+                            Style::default()
+                                .fg(app.theme.cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                    }
                 }
                 lines.push(Line::from(state_spans));
 
@@ -531,6 +610,105 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                 }
             } else {
                 // UNINSTALLED GAME VIEW:
+                let is_active_dl =
+                    app.active_install.as_ref().map(|i| &i.app_name) == Some(&g.app_name);
+                let queue_pos = app.install_queue.iter().position(|q| q == &g.app_name);
+
+                if is_active_dl {
+                    let inst = app.active_install.as_ref().unwrap();
+                    lines.push(Line::from(vec![
+                        Span::styled("Status:       ", Style::default().fg(app.theme.cyan)),
+                        Span::styled(
+                            format!("Downloading ({:.1}%)", inst.progress.percentage),
+                            Style::default()
+                                .fg(app.theme.cyan)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+
+                    let bar_width = 24;
+                    let filled =
+                        ((inst.progress.percentage / 100.0) * bar_width as f32).round() as usize;
+                    let filled = filled.min(bar_width);
+                    let empty = bar_width - filled;
+                    let bar_str = format!(
+                        "[{}{}] {:.1}%",
+                        "█".repeat(filled),
+                        "░".repeat(empty),
+                        inst.progress.percentage
+                    );
+                    lines.push(Line::from(vec![
+                        Span::styled("Progress:     ", Style::default().fg(app.theme.cyan)),
+                        Span::styled(
+                            bar_str,
+                            Style::default()
+                                .fg(app.theme.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+
+                    lines.push(Line::from(vec![
+                        Span::styled("Speed / ETA:  ", Style::default().fg(app.theme.cyan)),
+                        Span::styled(
+                            format!(
+                                "{} • ETA: {}",
+                                inst.progress.speed_str, inst.progress.eta_str
+                            ),
+                            Style::default().fg(app.theme.fg),
+                        ),
+                    ]));
+
+                    if inst.progress.downloaded_bytes > 0 || inst.progress.total_bytes > 0 {
+                        let dl_bytes = prefix::fmt_size(inst.progress.downloaded_bytes);
+                        let total_bytes = if inst.progress.total_bytes > 0 {
+                            prefix::fmt_size(inst.progress.total_bytes)
+                        } else {
+                            "Unknown".to_string()
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled("Downloaded:   ", Style::default().fg(app.theme.cyan)),
+                            Span::styled(
+                                format!("{dl_bytes} / {total_bytes}"),
+                                Style::default().fg(app.theme.fg),
+                            ),
+                        ]));
+                    }
+
+                    lines.push(Line::from(vec![
+                        Span::styled("Stage:        ", Style::default().fg(app.theme.cyan)),
+                        Span::styled(
+                            &inst.progress.status_stage,
+                            Style::default().fg(app.theme.yellow),
+                        ),
+                    ]));
+
+                    lines.push(Line::from(vec![
+                        Span::styled("Actions:      ", Style::default().fg(app.theme.cyan)),
+                        Span::styled(
+                            "[c] Cancel Download",
+                            Style::default()
+                                .fg(app.theme.red)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                    lines.push(Line::from(""));
+                } else if let Some(pos) = queue_pos {
+                    lines.push(Line::from(vec![
+                        Span::styled("Status:       ", Style::default().fg(app.theme.cyan)),
+                        Span::styled(
+                            format!("Queued for download (position #{})", pos + 1),
+                            Style::default()
+                                .fg(app.theme.yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                    lines.push(Line::from(vec![
+                        Span::styled("Actions:      ", Style::default().fg(app.theme.cyan)),
+                        Span::styled("[c] Remove from queue", Style::default().fg(app.theme.red)),
+                    ]));
+                    lines.push(Line::from(""));
+                }
+
                 // ProtonDB Rating
                 let (pdb_lbl, pdb_val) =
                     protondb_badge(details.and_then(|d| d.protondb_tier.as_deref()), &app.theme);

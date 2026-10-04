@@ -19,6 +19,7 @@ pub enum Intent {
     Refresh,
     Update,
     DeleteMenu,
+    CancelDownload,
     Settings,
     Help,
     Quit,

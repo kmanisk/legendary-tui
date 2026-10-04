@@ -118,3 +118,43 @@ pub fn check_installed_updates() -> Result<HashMap<String, String>, String> {
     }
     Ok(map)
 }
+
+/// Uninstall a game cleanly via Legendary non-interactively.
+/// Passes `-y` to avoid terminal prompts and verifies the result.
+pub fn uninstall_game(app_name: &str) -> Result<(), String> {
+    let out = Command::new("legendary")
+        .args(["-y", "uninstall", app_name])
+        .output()
+        .map_err(|e| format!("cannot run legendary: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    if stdout.contains("ERROR:")
+        || stderr.contains("ERROR:")
+        || stdout.contains("Aborting")
+        || stderr.contains("Aborting")
+        || !out.status.success()
+    {
+        let err = if !stderr.trim().is_empty() {
+            stderr.trim()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim()
+        } else {
+            "legendary uninstall failed"
+        };
+        return Err(err.to_string());
+    }
+
+    // Verify it is no longer in installed_map
+    if let Ok(map) = installed_map() {
+        if map.contains_key(app_name) {
+            return Err(
+                "Legendary reported success, but game is still present in installed registry."
+                    .into(),
+            );
+        }
+    }
+
+    Ok(())
+}

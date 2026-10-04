@@ -111,6 +111,7 @@ fn to_intent(key: crossterm::event::KeyEvent, searching: bool, in_input: bool) -
         KeyCode::Char('r') => Some(Intent::Refresh),
         KeyCode::Char('u') => Some(Intent::Update),
         KeyCode::Char('d') => Some(Intent::DeleteMenu),
+        KeyCode::Char('c') | KeyCode::Char('C') => Some(Intent::CancelDownload),
         KeyCode::Char('s') => Some(Intent::Settings),
         KeyCode::Char('?') => Some(Intent::Help),
         KeyCode::Char('q') => Some(Intent::Quit),
@@ -283,7 +284,12 @@ fn run() -> Result<(), String> {
         let Some(intent) = to_intent(key, app.searching, in_input) else {
             continue;
         };
-        if matches!(intent, Intent::Quit) && !app.in_install_mode() {
+        if matches!(intent, Intent::Quit) {
+            if app.active_install.is_some() {
+                app.handle(Intent::Quit);
+                app.dirty = true;
+                continue;
+            }
             break;
         }
         app.handle(intent);

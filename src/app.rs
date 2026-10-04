@@ -36,6 +36,11 @@ pub(crate) enum Op {
     SetPerGameLsfg(String),
     StartInstall(String),
     StartInstallBatch(Vec<String>),
+    CancelInstall(String),
+    DequeueInstall(String),
+    PrioritizeQueue(String),
+    QuitWithCancel,
+    ViewInstallScreen,
     CleanStale,
     Back,
 }
@@ -53,6 +58,8 @@ pub(crate) enum MenuKind {
     ProtonSelect { app: Option<String> },
     DeleteConfirm(String),
     BatchInstalled(Vec<String>),
+    Downloading(String),
+    Queued(String),
 }
 
 #[derive(Clone, Debug)]
@@ -269,27 +276,36 @@ impl App {
                     let _ = rofi::ensure(&title, &app_id);
                     self.selected_games.remove(&app_id);
 
-                    if let Some(next_app) = self.install_queue.pop() {
+                    if !self.install_queue.is_empty() {
+                        let next_app = self.install_queue.remove(0);
                         let next_title = self.title_of(&next_app);
-                        self.say(format!("Installed {title}. Starting {next_title}..."));
+                        self.say(format!("Installed {title}. Starting next: {next_title}..."));
                         self.start_in_app_install(&next_app);
                     } else {
                         self.say(format!("Installed {title} successfully."));
-                        self.mode = Mode::Library;
                     }
                     updated = true;
                 }
                 Ok(None) => {
-                    self.mode = Mode::Install(inst.progress.clone());
+                    if let Mode::Install(ref mut p) = self.mode {
+                        *p = inst.progress.clone();
+                    }
                     updated = true;
                 }
                 Err(e) => {
                     let title = inst.title.clone();
                     self.active_install = None;
-                    self.install_queue.clear();
-                    self.say(format!("Install of {title} stopped: {e}"));
-                    self.mode = Mode::Library;
                     let _ = self.refresh_installed();
+                    if !self.install_queue.is_empty() {
+                        let next_app = self.install_queue.remove(0);
+                        let next_title = self.title_of(&next_app);
+                        self.say(format!(
+                            "Install of {title} failed ({e}). Starting {next_title}..."
+                        ));
+                        self.start_in_app_install(&next_app);
+                    } else {
+                        self.say(format!("Install of {title} stopped: {e}"));
+                    }
                     updated = true;
                 }
             }
@@ -369,10 +385,6 @@ impl App {
 
     pub fn in_input_mode(&self) -> bool {
         matches!(self.mode, Mode::Input { .. })
-    }
-
-    pub fn in_install_mode(&self) -> bool {
-        self.active_install.is_some() || matches!(self.mode, Mode::Install(_))
     }
 
     pub fn update_selected_details(&mut self) {
@@ -518,11 +530,23 @@ impl App {
     }
 
     pub fn status_line(&self) -> String {
-        if let Mode::Install(prog) = &self.mode {
-            return format!(
-                "Installing: {} | {:.1}% | {} | ETA: {}",
-                prog.title, prog.percentage, prog.speed_str, prog.eta_str
+        let mut dl_info = String::new();
+        if let Some(inst) = &self.active_install {
+            let q_str = if self.install_queue.is_empty() {
+                String::new()
+            } else {
+                format!(" (+{} queued)", self.install_queue.len())
+            };
+            dl_info = format!(
+                "[↓ {} {:.1}% • {} • ETA: {}{}]  ",
+                inst.title,
+                inst.progress.percentage,
+                inst.progress.speed_str,
+                inst.progress.eta_str,
+                q_str
             );
+        } else if !self.install_queue.is_empty() {
+            dl_info = format!("[{} in download queue]  ", self.install_queue.len());
         }
         let installed = self.games.iter().filter(|g| g.installed).count();
         let mut total_installed_bytes = 0u64;
@@ -542,7 +566,7 @@ impl App {
         };
 
         let mut s = format!(
-            "{} Games | {} Installed{} | Proton: {} | Filter: {}",
+            "{dl_info}{} Games | {} Installed{} | Proton: {} | Filter: {}",
             self.games.len(),
             installed,
             size_info,
@@ -622,9 +646,36 @@ impl App {
     }
 
     // ---- In-App Install ---------------------------------------------------
+    pub fn queue_or_start_install(&mut self, app: &str) {
+        let title = self.title_of(app);
+        if self.active_install.as_ref().map(|i| &i.app_name) == Some(&app.to_string()) {
+            self.say(format!("{title} is already downloading."));
+            return;
+        }
+        if self.install_queue.iter().any(|q| q == app) {
+            self.say(format!("{title} is already in the download queue."));
+            return;
+        }
+        if self.active_install.is_none() {
+            self.start_in_app_install(app);
+        } else {
+            self.install_queue.push(app.to_string());
+            let pos = self.install_queue.len();
+            self.say(format!("Queued {title} for download (#{pos} in queue)."));
+        }
+    }
+
+    pub fn dequeue_install(&mut self, app: &str) {
+        if let Some(pos) = self.install_queue.iter().position(|q| q == app) {
+            self.install_queue.remove(pos);
+            let title = self.title_of(app);
+            self.say(format!("Removed {title} from download queue."));
+        }
+    }
+
     fn start_in_app_install(&mut self, app: &str) {
         if self.active_install.is_some() {
-            self.say("An installation is already running.");
+            self.queue_or_start_install(app);
             return;
         }
         let (base, folder, _) = self.resolve_install(app);
@@ -635,13 +686,18 @@ impl App {
             .unwrap_or(0);
         match ActiveInstall::start(app, &title, &base, folder.as_deref(), total) {
             Ok(inst) => {
-                let initial = inst.progress.clone();
                 self.active_install = Some(inst);
-                self.mode = Mode::Install(initial);
-                self.say(format!("Installing {title}..."));
+                if matches!(self.mode, Mode::Confirm { .. }) {
+                    self.mode = Mode::Library;
+                }
+                self.say(format!("Downloading {title} in background..."));
             }
             Err(e) => {
                 self.say(format!("Install start failed: {e}"));
+                if !self.install_queue.is_empty() {
+                    let next = self.install_queue.remove(0);
+                    self.start_in_app_install(&next);
+                }
             }
         }
     }
@@ -928,79 +984,75 @@ impl App {
             }
             Op::DeleteGame(app) => {
                 let title = self.title_of(&app);
-                let guard = match process::SuspendGuard::suspend() {
-                    Ok(g) => g,
-                    Err(e) => {
-                        self.say(format!("terminal suspend failed: {e}"));
-                        return;
+                self.say(format!("Uninstalling {title}..."));
+                match crate::legendary::uninstall_game(&app) {
+                    Ok(()) => {
+                        let _ = rofi::remove(&app);
+                        self.rofi_entries = rofi::entries();
+                        self.selected_games.remove(&app);
+                        let _ = self.refresh_installed();
+                        self.say(format!("{title} uninstalled (prefix kept)."));
                     }
-                };
-                let ok = process::run_foreground(&["legendary", "uninstall", &app]);
-                guard.disarm();
-                self.suspended = true;
-                if ok {
-                    let _ = rofi::remove(&app);
-                    self.rofi_entries = rofi::entries();
-                    let _ = self.refresh_installed();
-                    self.say(format!("{title} uninstalled (prefix kept)."));
-                } else {
-                    self.say("Uninstall did not complete — nothing removed.");
+                    Err(e) => {
+                        self.say(format!("Uninstall failed: {e}"));
+                    }
                 }
             }
             Op::DeleteGamePrefix(app) => {
                 let title = self.title_of(&app);
-                let guard = match process::SuspendGuard::suspend() {
-                    Ok(g) => g,
-                    Err(e) => {
-                        self.say(format!("terminal suspend failed: {e}"));
-                        return;
-                    }
-                };
-                let ok = process::run_foreground(&["legendary", "uninstall", &app]);
-                guard.disarm();
-                self.suspended = true;
-                if ok {
-                    match self.prefix_path(&app) {
-                        Some(p) => match std::fs::remove_dir_all(&p) {
-                            Ok(_) => {
-                                self.prefix_sizes.remove(&app);
-                                self.say(format!("{title} + prefix removed."));
+                self.say(format!("Uninstalling {title} and prefix..."));
+                match crate::legendary::uninstall_game(&app) {
+                    Ok(()) => {
+                        let mut prefix_msg = String::new();
+                        if let Some(p) = self.prefix_path(&app) {
+                            if p.exists() {
+                                match std::fs::remove_dir_all(&p) {
+                                    Ok(_) => {
+                                        self.prefix_sizes.remove(&app);
+                                        prefix_msg = " + prefix removed".into();
+                                    }
+                                    Err(e) => {
+                                        prefix_msg = format!(" (prefix delete error: {e})");
+                                    }
+                                }
                             }
-                            Err(e) => self.say(format!("game gone, prefix kept ({e})")),
-                        },
-                        None => {
-                            self.say("game gone; no confident prefix found, nothing else touched.")
                         }
+                        let _ = rofi::remove(&app);
+                        self.rofi_entries = rofi::entries();
+                        self.selected_games.remove(&app);
+                        let _ = self.refresh_installed();
+                        self.say(format!("{title} uninstalled{prefix_msg}."));
                     }
-                    let _ = rofi::remove(&app);
-                    self.rofi_entries = rofi::entries();
-                    let _ = self.refresh_installed();
-                } else {
-                    self.say("Uninstall did not complete — nothing removed.");
+                    Err(e) => {
+                        self.say(format!("Uninstall failed: {e}"));
+                    }
                 }
             }
             Op::DeleteBatch(apps) => {
-                let guard = match process::SuspendGuard::suspend() {
-                    Ok(g) => g,
-                    Err(e) => {
-                        self.say(format!("terminal suspend failed: {e}"));
-                        return;
-                    }
-                };
                 let mut count = 0;
+                let mut errors = Vec::new();
                 for app in &apps {
-                    let ok = process::run_foreground(&["legendary", "uninstall", "-y", app]);
-                    if ok {
-                        let _ = rofi::remove(app);
-                        self.selected_games.remove(app);
-                        count += 1;
+                    match crate::legendary::uninstall_game(app) {
+                        Ok(()) => {
+                            let _ = rofi::remove(app);
+                            self.selected_games.remove(app);
+                            count += 1;
+                        }
+                        Err(e) => {
+                            errors.push(format!("{}: {e}", self.title_of(app)));
+                        }
                     }
                 }
-                guard.disarm();
-                self.suspended = true;
                 self.rofi_entries = rofi::entries();
                 let _ = self.refresh_installed();
-                self.say(format!("Uninstalled {count} of {} games.", apps.len()));
+                if errors.is_empty() {
+                    self.say(format!("Uninstalled {count} of {} games.", apps.len()));
+                } else {
+                    self.say(format!(
+                        "Uninstalled {count} games. Errors: {}",
+                        errors.join("; ")
+                    ));
+                }
             }
             Op::RemoveEntry(app) => match rofi::remove(&app) {
                 Ok(true) => {
@@ -1019,12 +1071,48 @@ impl App {
                 }
                 self.rofi_entries = rofi::entries();
             }
-            Op::StartInstall(app) => self.start_in_app_install(&app),
+            Op::StartInstall(app) => self.queue_or_start_install(&app),
             Op::StartInstallBatch(apps) => {
-                if !apps.is_empty() {
-                    let first = apps[0].clone();
-                    self.install_queue = apps.into_iter().skip(1).rev().collect();
-                    self.start_in_app_install(&first);
+                for app in apps {
+                    self.selected_games.remove(&app);
+                    self.queue_or_start_install(&app);
+                }
+            }
+            Op::CancelInstall(app) => {
+                if let Some(mut inst) = self.active_install.take() {
+                    let title = inst.title.clone();
+                    inst.cancel();
+                    let _ = self.refresh_installed();
+                    if !self.install_queue.is_empty() {
+                        let next = self.install_queue.remove(0);
+                        let next_title = self.title_of(&next);
+                        self.say(format!("Cancelled {title}. Starting {next_title}..."));
+                        self.start_in_app_install(&next);
+                    } else {
+                        self.say(format!("Cancelled download of {title}."));
+                    }
+                } else {
+                    self.dequeue_install(&app);
+                }
+            }
+            Op::DequeueInstall(app) => self.dequeue_install(&app),
+            Op::PrioritizeQueue(app) => {
+                if let Some(pos) = self.install_queue.iter().position(|q| q == &app) {
+                    let item = self.install_queue.remove(pos);
+                    self.install_queue.insert(0, item);
+                    let title = self.title_of(&app);
+                    self.say(format!("Moved {title} to front of download queue."));
+                }
+            }
+            Op::QuitWithCancel => {
+                if let Some(mut inst) = self.active_install.take() {
+                    inst.cancel();
+                }
+                std::process::exit(0);
+            }
+            Op::ViewInstallScreen => {
+                if let Some(inst) = &self.active_install {
+                    self.mode = Mode::Install(inst.progress.clone());
                 }
             }
             Op::SetDefaultPath => {}
@@ -1560,9 +1648,14 @@ impl App {
             self.pending_g = false;
         }
 
-        // Active installation view: Esc or q cancels
+        // Active installation view: Esc backgrounds, c cancels
         if let Mode::Install(_) = &self.mode {
-            if matches!(intent, Intent::Cancel | Intent::Quit) {
+            if matches!(intent, Intent::Cancel) {
+                self.mode = Mode::Library;
+                self.say("Download running in background.");
+                return;
+            }
+            if matches!(intent, Intent::CancelDownload) {
                 if let Some(mut inst) = self.active_install.take() {
                     inst.cancel();
                 }
@@ -1698,7 +1791,23 @@ impl App {
                 self.mode = Mode::Menu(self.settings_menu());
             }
             Intent::Help => self.mode = Mode::Help,
-            Intent::Quit => {}
+            Intent::CancelDownload => self.cancel_download_or_dequeue(),
+            Intent::Quit => {
+                if let Some(inst) = &self.active_install {
+                    let title = inst.title.clone();
+                    let perc = inst.progress.percentage;
+                    self.mode = Mode::Confirm {
+                        lines: vec![
+                            "Download in progress!".into(),
+                            "".into(),
+                            format!("{title}: {perc:.1}%"),
+                            "".into(),
+                            "Quit egs and cancel the download?".into(),
+                        ],
+                        op: Op::QuitWithCancel,
+                    };
+                }
+            }
             Intent::Enter => self.on_enter(),
             Intent::Update => match self.installed_or_msg() {
                 Some(a) => self.start_in_app_install(&a),
@@ -1822,6 +1931,37 @@ impl App {
         };
         if g.installed {
             self.mode = Mode::Menu(self.installed_menu(&g.app_name));
+        } else if self.active_install.as_ref().map(|i| &i.app_name) == Some(&g.app_name) {
+            self.mode = Mode::Menu(Menu {
+                title: format!("{} (Downloading)", g.title),
+                items: vec![
+                    ("View Live Progress".into(), Op::ViewInstallScreen),
+                    (
+                        "Cancel Download".into(),
+                        Op::CancelInstall(g.app_name.clone()),
+                    ),
+                    ("Game details".into(), Op::Details(g.app_name.clone())),
+                ],
+                idx: 0,
+                kind: MenuKind::Downloading(g.app_name),
+            });
+        } else if self.install_queue.iter().any(|q| q == &g.app_name) {
+            self.mode = Mode::Menu(Menu {
+                title: format!("{} (Queued)", g.title),
+                items: vec![
+                    (
+                        "Remove from Queue".into(),
+                        Op::DequeueInstall(g.app_name.clone()),
+                    ),
+                    (
+                        "Move to Front of Queue".into(),
+                        Op::PrioritizeQueue(g.app_name.clone()),
+                    ),
+                    ("Game details".into(), Op::Details(g.app_name.clone())),
+                ],
+                idx: 0,
+                kind: MenuKind::Queued(g.app_name),
+            });
         } else {
             let (base, folder, _) = self.resolve_install(&g.app_name);
             let target_dir = match &folder {
@@ -1837,15 +1977,28 @@ impl App {
                 .and_then(|d| d.installed_size)
                 .map(prefix::fmt_size)
                 .unwrap_or_else(|| "fetching...".into());
+
+            let prompt_title = if self.active_install.is_some() {
+                format!("Queue {} for download?", g.title)
+            } else {
+                format!("Download {} in background?", g.title)
+            };
+            let queue_note = if self.active_install.is_some() {
+                "Note: A download is currently active. This will be queued."
+            } else {
+                "Note: Download will run in the background."
+            };
+
             self.mode = Mode::Confirm {
                 lines: vec![
-                    format!("Install {}?", g.title),
+                    prompt_title,
                     "".into(),
                     format!("Target location: {target_dir}"),
                     format!("Download size:   {dl_str}"),
                     format!("Installed size:  {inst_str}"),
                     "".into(),
-                    "Proceed with installation?".into(),
+                    queue_note.into(),
+                    "Proceed?".into(),
                 ],
                 op: Op::StartInstall(g.app_name),
             };
@@ -2223,6 +2376,14 @@ impl App {
         }
 
         if let Some(g) = self.current().cloned() {
+            if self.active_install.as_ref().map(|i| &i.app_name) == Some(&g.app_name) {
+                self.cancel_download_or_dequeue();
+                return;
+            }
+            if self.install_queue.iter().any(|q| q == &g.app_name) {
+                self.dequeue_install(&g.app_name);
+                return;
+            }
             if !g.installed {
                 self.say("Not installed — nothing to delete.");
                 return;
@@ -2245,6 +2406,43 @@ impl App {
                 kind: MenuKind::DeleteConfirm(app),
             });
         }
+    }
+
+    pub fn cancel_download_or_dequeue(&mut self) {
+        if let Some(g) = self.current() {
+            let app_name = g.app_name.clone();
+            let title = g.title.clone();
+            if self.active_install.as_ref().map(|i| &i.app_name) == Some(&app_name) {
+                self.mode = Mode::Confirm {
+                    lines: vec![
+                        format!("Cancel download of {title}?"),
+                        "".into(),
+                        "The download process will be stopped.".into(),
+                    ],
+                    op: Op::CancelInstall(app_name),
+                };
+                return;
+            }
+            if let Some(pos) = self.install_queue.iter().position(|q| q == &app_name) {
+                self.install_queue.remove(pos);
+                self.say(format!("Removed {title} from download queue."));
+                return;
+            }
+        }
+        if let Some(inst) = &self.active_install {
+            let title = inst.title.clone();
+            let app_name = inst.app_name.clone();
+            self.mode = Mode::Confirm {
+                lines: vec![
+                    format!("Cancel download of {title}?"),
+                    "".into(),
+                    "The download process will be stopped.".into(),
+                ],
+                op: Op::CancelInstall(app_name),
+            };
+            return;
+        }
+        self.say("No active download or queued game to cancel.");
     }
 
     // ---- View Helpers for ui.rs -------------------------------------------
@@ -2564,7 +2762,9 @@ mod tests {
         app.handle(Intent::Enter);
         assert!(matches!(app.mode, Mode::Confirm { .. }));
         app.handle(Intent::ConfirmYes);
-        assert!(matches!(app.mode, Mode::Install(_)));
+        assert!(app.active_install.is_some());
+        assert_eq!(app.install_queue.len(), 1);
+        assert!(matches!(app.mode, Mode::Library));
 
         // Reset and test installed guardrail
         let mut app2 = test_app();
@@ -2700,5 +2900,29 @@ mod tests {
             lbl.contains("Set per-game install location (Game Alpha)")
                 && matches!(op, Op::SetPerGamePath(id) if id == "app1")
         }));
+    }
+
+    #[test]
+    fn background_install_queue_and_cancel() {
+        let mut app = test_app();
+        app.queue_or_start_install("app1");
+        assert!(app.active_install.is_some());
+        assert_eq!(app.install_queue.len(), 0);
+
+        // Queue second game
+        app.queue_or_start_install("app3");
+        assert!(app.active_install.is_some());
+        assert_eq!(app.install_queue.len(), 1);
+        assert_eq!(app.install_queue[0], "app3");
+
+        // Dequeue second game
+        app.dequeue_install("app3");
+        assert_eq!(app.install_queue.len(), 0);
+
+        // Cancel active install
+        app.cancel_download_or_dequeue();
+        assert!(matches!(app.mode, Mode::Confirm { .. }));
+        app.handle(Intent::ConfirmYes);
+        assert!(app.active_install.is_none());
     }
 }
