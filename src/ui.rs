@@ -113,32 +113,43 @@ pub fn draw(f: &mut Frame, app: &App) {
             Style::default().fg(app.theme.yellow),
         ));
     }
-    let header_block = if let Some(user) = &app.user_name {
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(app.theme.muted))
-            .style(Style::default().bg(app.theme.bg).fg(app.theme.fg))
-            .title_top(
-                Line::from(vec![
-                    Span::styled(" [", Style::default().fg(app.theme.muted)),
-                    Span::styled(
-                        format!("👤 {user}"),
-                        Style::default()
-                            .fg(app.theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled("] ", Style::default().fg(app.theme.muted)),
-                ])
-                .alignment(Alignment::Right),
-            )
+    let header_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.muted))
+        .style(Style::default().bg(app.theme.bg).fg(app.theme.fg));
+
+    let inner_header = header_block.inner(rows[0]);
+    f.render_widget(header_block, rows[0]);
+
+    if let Some(user) = &app.user_name {
+        let user_width = (user.chars().count() as u16).saturating_add(4);
+        let header_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(user_width),
+            ])
+            .split(inner_header);
+
+        let left_header = Paragraph::new(vec![Line::from(header_spans)]);
+        f.render_widget(left_header, header_cols[0]);
+
+        let user_line = Line::from(vec![
+            Span::styled("👤 ", Style::default().fg(app.theme.accent)),
+            Span::styled(
+                user.clone(),
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+        ]);
+        let right_header = Paragraph::new(vec![user_line]).alignment(Alignment::Right);
+        f.render_widget(right_header, header_cols[1]);
     } else {
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(app.theme.muted))
-            .style(Style::default().bg(app.theme.bg).fg(app.theme.fg))
-    };
-    let header = Paragraph::new(vec![Line::from(header_spans)]).block(header_block);
-    f.render_widget(header, rows[0]);
+        let header = Paragraph::new(vec![Line::from(header_spans)]);
+        f.render_widget(header, inner_header);
+    }
 
     // Body: list | detail
     let cols = Layout::default()
