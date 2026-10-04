@@ -25,6 +25,7 @@ pub enum Intent {
     CloudSaves,
     Settings,
     Help,
+    OpenStore,
     Quit,
     Cancel,
     ConfirmYes,

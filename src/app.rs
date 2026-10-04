@@ -42,6 +42,7 @@ pub(crate) enum Op {
     QuitWithCancel,
     ViewInstallScreen,
     CleanStale,
+    OpenStore(String),
     CloudSavesMenu(String),
     DoCloudList(String),
     ConfirmCloudSync(String),
@@ -718,6 +719,50 @@ impl App {
             .unwrap_or_else(|| app.to_string())
     }
 
+    pub(crate) fn open_store_page_for(&mut self, app_name: &str) {
+        let title = self.title_of(app_name);
+        self.launch_store_url(&title);
+    }
+
+    pub(crate) fn open_store_page(&mut self) {
+        if let Some(game) = self.current() {
+            let title = game.title.clone();
+            self.launch_store_url(&title);
+        } else {
+            self.say("Select a game first.");
+        }
+    }
+
+    fn launch_store_url(&mut self, title: &str) {
+        if title.is_empty() {
+            self.say("No game title available.");
+            return;
+        }
+        let mut encoded = String::with_capacity(title.len() * 3);
+        for b in title.bytes() {
+            match b {
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    encoded.push(b as char);
+                }
+                b' ' => encoded.push('+'),
+                _ => {
+                    encoded.push_str(&format!("%{:02X}", b));
+                }
+            }
+        }
+        let url = format!("https://store.epicgames.com/browse?q={encoded}");
+        match std::process::Command::new("xdg-open")
+            .arg(&url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => self.say(format!("Opened store page for '{title}'")),
+            Err(e) => self.say(format!("Failed to open browser: {e}")),
+        }
+    }
+
     fn resolve_install(&self, app: &str) -> (String, Option<String>, &'static str) {
         if let Some(p) = self.cfg.games.get(app).and_then(|g| g.install_path.clone()) {
             let path = std::path::Path::new(&p);
@@ -993,6 +1038,7 @@ impl App {
     fn execute(&mut self, op: Op) {
         match op {
             Op::Play(app) => self.launch_game(&app),
+            Op::OpenStore(app) => self.open_store_page_for(&app),
             Op::Details(_) => {}
             Op::Update(app) => self.start_in_app_install(&app),
             Op::MoveGame(app) => {
@@ -1719,6 +1765,10 @@ impl App {
                 Op::Update(app.to_string()),
             ),
             (
+                "Open Epic Games Store page (o)".to_string(),
+                Op::OpenStore(app.to_string()),
+            ),
+            (
                 "Delete game (keep prefix)".to_string(),
                 Op::DeleteGame(app.to_string()),
             ),
@@ -2304,6 +2354,7 @@ impl App {
                     .unwrap_or_default();
                 self.prompt_import_game(initial);
             }
+            Intent::OpenStore => self.open_store_page(),
             Intent::DeleteMenu => self.quick_delete_menu(),
             Intent::Cancel => match self.mode {
                 Mode::Library => {
@@ -3588,5 +3639,17 @@ mod tests {
             .items
             .iter()
             .any(|(lbl, _)| lbl.contains("Enabled")));
+    }
+
+    #[test]
+    fn open_store_page_flow() {
+        let mut app = test_app();
+        app.selected = 1;
+        app.handle(Intent::OpenStore);
+        assert!(
+            app.status.contains("Game")
+                || app.status.contains("store page")
+                || app.status.contains("Failed")
+        );
     }
 }

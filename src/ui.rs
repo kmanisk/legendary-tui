@@ -107,7 +107,10 @@ pub fn draw(f: &mut Frame, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ));
     }
-    if !app.status.is_empty() {
+    let show_status = !app.status.is_empty()
+        && !(app.active_install.is_some() && app.status.starts_with("Downloading"))
+        && !(app.active_verify.is_some() && app.status.starts_with("Verifying"));
+    if show_status {
         header_spans.push(Span::styled(
             format!("      {}", app.status),
             Style::default().fg(app.theme.yellow),
@@ -127,6 +130,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Min(1),
+                Constraint::Length(2),
                 Constraint::Length(user_width),
             ])
             .split(inner_header);
@@ -145,7 +149,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             Span::raw(" "),
         ]);
         let right_header = Paragraph::new(vec![user_line]).alignment(Alignment::Right);
-        f.render_widget(right_header, header_cols[1]);
+        f.render_widget(right_header, header_cols[2]);
     } else {
         let header = Paragraph::new(vec![Line::from(header_spans)]);
         f.render_widget(header, inner_header);
@@ -260,6 +264,8 @@ pub fn draw(f: &mut Frame, app: &App) {
             Span::styled(" Refresh  ", fg_style),
             Span::styled("s", key_style),
             Span::styled(" Settings  ", fg_style),
+            Span::styled("o", key_style),
+            Span::styled(" Store  ", fg_style),
             Span::styled("?", key_style),
             Span::styled(" Help  ", fg_style),
             Span::styled("q", key_style),
@@ -1293,6 +1299,10 @@ fn draw_help_popup(f: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled("s                 ", Style::default().fg(app.theme.cyan)),
             Span::raw("Settings (Cleanup, Account, Proton, LSFG)"),
+        ]),
+        Line::from(vec![
+            Span::styled("o                 ", Style::default().fg(app.theme.cyan)),
+            Span::raw("Open Epic Games Store page in browser"),
         ]),
         Line::from(vec![
             Span::styled("?                 ", Style::default().fg(app.theme.cyan)),

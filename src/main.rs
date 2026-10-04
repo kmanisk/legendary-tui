@@ -116,6 +116,7 @@ fn to_intent(key: crossterm::event::KeyEvent, searching: bool, in_input: bool) -
         KeyCode::Char('c') | KeyCode::Char('C') => Some(Intent::CloudSaves),
         KeyCode::Char('x') => Some(Intent::CancelDownload),
         KeyCode::Char('s') => Some(Intent::Settings),
+        KeyCode::Char('o' | 'O') => Some(Intent::OpenStore),
         KeyCode::Char('?') => Some(Intent::Help),
         KeyCode::Char('q') => Some(Intent::Quit),
         KeyCode::Char('y') | KeyCode::Char('Y') => Some(Intent::ConfirmYes),

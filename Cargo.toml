@@ -1,6 +1,6 @@
 [package]
 name = "legendary-tui"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 description = "Fast, keyboard-driven Ratatui TUI frontend for Legendary Epic Games Store CLI"
 repository = "https://github.com/kmanisk/legendary-tui"

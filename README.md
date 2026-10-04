@@ -10,6 +10,22 @@ Installed executable: **`legendary-tui`**
 
 ---
 
+## Screenshots
+
+| Library & Details | Background Download Confirmation |
+| :---: | :---: |
+| ![Library & Details](assets/01-library-details.png) | ![Download Confirmation](assets/02-download-confirm.png) |
+
+| Background Download In Progress | Real-Time ETA, Speed & Queue Tracking |
+| :---: | :---: |
+| ![Background Download](assets/03-background-download.png) | ![Download Details](assets/04-download-details.png) |
+
+| Safe Cancellation Dialog |
+| :---: |
+| ![Cancel Download Confirmation](assets/05-cancel-download.png) |
+
+---
+
 ## Features
 
 ### Legendary Core Operations
@@ -63,6 +79,7 @@ Installed executable: **`legendary-tui`**
 | `c` | Any / Installed | Open **Cloud Saves** menu |
 | `v` | Installed | **Verify game files** against manifest |
 | `i` | Library / Settings | **Import existing game** installation |
+| `o` | Any | Open game page in **Epic Games Store** (web browser) |
 | `u` | Installed | Check for updates / run repair |
 | `d` | Installed | Delete game (options for keeping or removing prefix) |
 | `x` | Active download/verify | Cancel download, dequeue, or cancel verification |
