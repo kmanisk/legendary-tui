@@ -328,7 +328,47 @@ pub fn parse_legendary_metadata_json(val: &serde_json::Value, details: &mut Game
                 }
             }
         }
+        if let Some(imgs) = meta.get("keyImages").and_then(|v| v.as_array()) {
+            if let Some(url) = select_best_game_image(imgs) {
+                details.cover_url = Some(url);
+            }
+        }
     }
+}
+
+/// Select the best cover/poster image URL from an array of Epic keyImages.
+/// Prioritizes tall portrait box art (DieselGameBoxTall / OfferImageTall),
+/// then wide box art, then any valid image URL.
+pub fn select_best_game_image(images: &[serde_json::Value]) -> Option<String> {
+    let mut best_url: Option<String> = None;
+    let mut best_rank = 0;
+
+    for img in images {
+        let url = match img.get("url").and_then(|v| v.as_str()) {
+            Some(u) if u.starts_with("http://") || u.starts_with("https://") => u,
+            _ => continue,
+        };
+        let img_type = img.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+        let rank = match img_type {
+            "DieselGameBoxTall" => 10,
+            "OfferImageTall" => 9,
+            "DieselStoreFrontVertical" => 8,
+            t if t.to_lowercase().contains("tall") => 7,
+            t if t.to_lowercase().contains("vertical") => 6,
+            "DieselGameBox" => 5,
+            "DieselGameBoxWide" => 4,
+            "OfferImageWide" => 3,
+            _ => 1,
+        };
+
+        if rank > best_rank {
+            best_rank = rank;
+            best_url = Some(url.to_string());
+        }
+    }
+
+    best_url
 }
 
 /// Run `legendary info <app_name> --json` once in background to retrieve manifest sizes.
@@ -701,5 +741,28 @@ mod tests {
             vec!["EasyAntiCheat/EasyAntiCheat_EOS_Setup.exe"]
         );
         assert_eq!(details.download_size, Some(39746389618));
+    }
+
+    #[test]
+    fn test_select_best_game_image() {
+        let json = serde_json::json!([
+            {
+                "type": "DieselGameBox",
+                "url": "https://cdn.example.com/box.jpg"
+            },
+            {
+                "type": "DieselGameBoxTall",
+                "url": "https://cdn.example.com/tall.jpg"
+            },
+            {
+                "type": "OfferImageWide",
+                "url": "https://cdn.example.com/wide.jpg"
+            }
+        ]);
+        let selected = super::select_best_game_image(json.as_array().unwrap());
+        assert_eq!(
+            selected.as_deref(),
+            Some("https://cdn.example.com/tall.jpg")
+        );
     }
 }

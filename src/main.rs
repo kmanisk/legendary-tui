@@ -1,6 +1,7 @@
 //! legendary-tui — native Epic Games library TUI (legendary backend, Alt+G integration).
 
 mod app;
+mod artwork;
 mod cache;
 mod config;
 mod filesystem;
@@ -68,6 +69,7 @@ fn to_intent(key: crossterm::event::KeyEvent, searching: bool, in_input: bool) -
         return match key.code {
             KeyCode::Char('d') | KeyCode::Char('D') => Some(Intent::PageDown),
             KeyCode::Char('u') | KeyCode::Char('U') => Some(Intent::PageUp),
+            KeyCode::Char('r') | KeyCode::Char('R') => Some(Intent::RefreshArtwork),
             _ => None,
         };
     }
@@ -109,6 +111,7 @@ fn to_intent(key: crossterm::event::KeyEvent, searching: bool, in_input: bool) -
         KeyCode::Enter | KeyCode::Char(' ') => Some(Intent::Enter),
         KeyCode::Char('/') => Some(Intent::Search),
         KeyCode::Char('r') => Some(Intent::Refresh),
+        KeyCode::Char('R') => Some(Intent::RefreshArtwork),
         KeyCode::Char('u') => Some(Intent::Update),
         KeyCode::Char('v') => Some(Intent::VerifyGame),
         KeyCode::Char('i') => Some(Intent::ImportGame),
@@ -266,8 +269,11 @@ fn ensure_legendary_installed() -> Result<(), String> {
 fn run() -> Result<(), String> {
     ensure_legendary_installed()?;
 
-    let mut app = App::new()?;
     let mut term = enter_tui()?;
+    let picker = ratatui_image::picker::Picker::from_query_stdio()
+        .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+    let mut app = App::new()?;
+    app.set_picker(picker);
 
     let theme_reload_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let _ = signal_hook::flag::register(
@@ -288,7 +294,7 @@ fn run() -> Result<(), String> {
         }
 
         if app.dirty {
-            term.draw(|f| ui::draw(f, &app))
+            term.draw(|f| ui::draw(f, &mut app))
                 .map_err(|e| format!("draw: {e}"))?;
             app.dirty = false;
         }

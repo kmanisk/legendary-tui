@@ -42,7 +42,7 @@ fn solid_block<'a>(title: &'a str, theme: &crate::theme::Theme) -> Block<'a> {
         ))
 }
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -234,6 +234,8 @@ pub fn draw(f: &mut Frame, app: &App) {
             spans.push(Span::styled("i", key_style));
             spans.push(Span::styled(" Import  ", fg_style));
         }
+        spans.push(Span::styled("R", key_style));
+        spans.push(Span::styled(" Cover  ", fg_style));
 
         if app.active_install.is_some()
             || !app.install_queue.is_empty()
@@ -467,7 +469,18 @@ fn protondb_badge<'a>(tier: Option<&str>, theme: &'a crate::theme::Theme) -> (Sp
     (label, val)
 }
 
-fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
+fn draw_detail(f: &mut Frame, app: &mut App, area: Rect) {
+    let (text_area, art_area) = if area.width >= 64 {
+        let art_width = 30.min(area.width.saturating_sub(35));
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(35), Constraint::Length(art_width)])
+            .split(area);
+        (cols[0], Some(cols[1]))
+    } else {
+        (area, None)
+    };
+
     let mut lines = Vec::new();
     match app.current() {
         Some(g) => {
@@ -938,8 +951,8 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
             )]));
 
             if let Some(desc) = details.and_then(|d| d.description.as_deref()) {
-                // Word wrap description to area width
-                let max_w = (area.width.saturating_sub(4) as usize).max(20);
+                // Word wrap description to text_area width
+                let max_w = (text_area.width.saturating_sub(4) as usize).max(20);
                 for wrapped in wrap_text(desc, max_w) {
                     lines.push(Line::from(Span::styled(
                         wrapped,
@@ -959,7 +972,7 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
         ))),
     }
 
-    let visible_height = area.height.saturating_sub(2);
+    let visible_height = text_area.height.saturating_sub(2);
     let total_lines = lines.len() as u16;
     let max_scroll = total_lines.saturating_sub(visible_height);
     let scroll_y = app.detail_scroll.min(max_scroll);
@@ -985,8 +998,56 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(app.theme.accent),
                 )),
         ),
-        area,
+        text_area,
     );
+
+    if let Some(art_rect) = art_area {
+        let art_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.theme.muted))
+            .style(Style::default().bg(app.theme.bg).fg(app.theme.fg))
+            .title(Span::styled(
+                " Cover [R] ",
+                Style::default().fg(app.theme.accent),
+            ));
+        let art_inner = art_block.inner(art_rect);
+        f.render_widget(art_block, art_rect);
+
+        if art_inner.width > 0 && art_inner.height > 0 {
+            if let Some(state) = &mut app.current_image_state {
+                let img_widget = ratatui_image::StatefulImage::default()
+                    .resize(ratatui_image::Resize::Fit(None));
+                f.render_stateful_widget(img_widget, art_inner, state);
+            } else if let Some(details) = &app.selected_details {
+                if app.artwork_mgr.is_pending(&details.app_name) {
+                    let loading_lines = vec![
+                        Line::from(""),
+                        Line::from(Span::styled(
+                            "⏳ Loading...",
+                            Style::default().fg(app.theme.cyan),
+                        )),
+                    ];
+                    let p = Paragraph::new(loading_lines).alignment(Alignment::Center);
+                    f.render_widget(p, art_inner);
+                } else {
+                    let empty_lines = vec![
+                        Line::from(""),
+                        Line::from(Span::styled(
+                            "No Artwork",
+                            Style::default().fg(app.theme.muted),
+                        )),
+                        Line::from(""),
+                        Line::from(Span::styled(
+                            "[R] Refresh",
+                            Style::default().fg(app.theme.muted),
+                        )),
+                    ];
+                    let p = Paragraph::new(empty_lines).alignment(Alignment::Center);
+                    f.render_widget(p, art_inner);
+                }
+            }
+        }
+    }
 }
 
 fn wrap_text(text: &str, max_width: usize) -> Vec<String> {

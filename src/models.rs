@@ -65,6 +65,8 @@ pub struct GameDetails {
     pub needs_update: bool,
     #[serde(default)]
     pub available_version: Option<String>,
+    #[serde(default)]
+    pub cover_url: Option<String>,
 }
 
 /// Relevance score for search ranking: exact > prefix > substring > fuzzy.

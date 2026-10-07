@@ -39,6 +39,7 @@ Installed executable: **`legendary-tui`**
 - **Import Existing Games**: Interactive guided directory selection (`fzf` assisted) for importing pre-existing Epic game installations (`legendary import`).
 - **Cache & Temporary Cleanup**: Safe maintenance action to clean chunk caches and stale manifests (`legendary cleanup`).
 - **Account & Session Management**: Account overview (`legendary status --json`), interactive re-authentication, and secure credential purge.
+- **Game Cover Artwork**: Real Epic Games Store portrait posters (`DieselGameBoxTall`) displayed directly inside the details panel using native Kitty graphics protocol (with automatic unicode half-block fallback for other terminals). Zero-blocking background fetching and deterministic caching at `~/.cache/legendary-tui/images/`.
 
 ### Linux Gaming & Compositor Integration
 - **Proton & Wine Discovery**: Automatic discovery of installed Proton-GE, Proton Experimental, Proton CachyOS, and system Wine runners.
@@ -67,6 +68,7 @@ Installed executable: **`legendary-tui`**
 | `f` | Cycle filter (*All* → *Installed* → *Available*) |
 | `/` | Start fuzzy search (`Esc` to cancel, `Enter` to confirm) |
 | `r` | Refresh library from Epic Games Store |
+| `R` or `Ctrl+r` | Refresh cover artwork for selected game |
 | `s` | Open Global Settings & Maintenance |
 | `?` | Show Help modal |
 | `q` | Quit application |

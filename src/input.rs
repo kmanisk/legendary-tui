@@ -17,6 +17,7 @@ pub enum Intent {
     Enter,
     Search,
     Refresh,
+    RefreshArtwork,
     Update,
     DeleteMenu,
     CancelDownload,

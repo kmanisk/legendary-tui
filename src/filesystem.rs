@@ -62,6 +62,11 @@ pub fn metadata_cache_dir() -> PathBuf {
     cache_dir().join("metadata")
 }
 
+/// Artwork image cache directory: `~/.cache/legendary-tui/images/`
+pub fn image_cache_dir() -> PathBuf {
+    cache_dir().join("images")
+}
+
 /// Legendary's metadata directory: `~/.config/legendary/metadata/`
 pub fn legendary_metadata_dir() -> PathBuf {
     home().join(".config/legendary/metadata")

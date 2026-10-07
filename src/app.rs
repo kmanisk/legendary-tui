@@ -134,6 +134,9 @@ pub struct App {
     pub(crate) active_verify: Option<ActiveVerify>,
     pub(crate) bg_action_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     pub(crate) user_name: Option<String>,
+    pub(crate) artwork_mgr: crate::artwork::ArtworkManager,
+    pub(crate) picker: ratatui_image::picker::Picker,
+    pub(crate) current_image_state: Option<ratatui_image::protocol::StatefulProtocol>,
 }
 
 type LibraryResult = Result<Vec<(String, String)>, String>;
@@ -208,6 +211,9 @@ impl App {
             active_verify: None,
             bg_action_rx: None,
             user_name: legendary::current_username(),
+            artwork_mgr: crate::artwork::ArtworkManager::new(),
+            picker: ratatui_image::picker::Picker::halfblocks(),
+            current_image_state: None,
         };
         app.set_library(lib);
         app.refresh_installed()?;
@@ -217,6 +223,15 @@ impl App {
         app.update_selected_details();
         app.spawn_update_check();
         Ok(app)
+    }
+
+    pub fn set_picker(&mut self, picker: ratatui_image::picker::Picker) {
+        self.picker = picker;
+        if let Some(details) = &self.selected_details {
+            if let Some(img) = self.artwork_mgr.get_cached(&details.app_name) {
+                self.current_image_state = Some(self.picker.new_resize_protocol((*img).clone()));
+            }
+        }
     }
 
     fn fetch_library() -> Result<Vec<(String, String)>, String> {
@@ -292,6 +307,17 @@ impl App {
         if self.metadata_mgr.poll_updates() {
             self.update_selected_details();
             updated = true;
+        }
+
+        // Poll artwork manager updates
+        if self.artwork_mgr.poll_updates() {
+            if let Some(details) = &self.selected_details {
+                if let Some(img) = self.artwork_mgr.get_cached(&details.app_name) {
+                    self.current_image_state =
+                        Some(self.picker.new_resize_protocol((*img).clone()));
+                    updated = true;
+                }
+            }
         }
 
         // 2. Poll ongoing install process
@@ -492,9 +518,25 @@ impl App {
                     }
                 }
             }
+            if let Some(details) = &d {
+                let img_opt = self.artwork_mgr.request_artwork(
+                    &details.app_name,
+                    details.cover_url.as_deref(),
+                    false,
+                );
+                if let Some(img) = img_opt {
+                    self.current_image_state =
+                        Some(self.picker.new_resize_protocol((*img).clone()));
+                } else if !self.artwork_mgr.is_pending(&details.app_name) {
+                    self.current_image_state = None;
+                }
+            } else {
+                self.current_image_state = None;
+            }
             self.selected_details = d;
         } else {
             self.selected_details = None;
+            self.current_image_state = None;
         }
     }
 
@@ -2376,6 +2418,21 @@ impl App {
             Intent::DetailScrollUp => {
                 self.detail_scroll = self.detail_scroll.saturating_sub(2);
             }
+            Intent::RefreshArtwork => {
+                if let Some(details) = &self.selected_details {
+                    let title = details.title.clone();
+                    let app_name = details.app_name.clone();
+                    let cover_url = details.cover_url.clone();
+                    self.artwork_mgr.invalidate(&app_name);
+                    self.current_image_state = None;
+                    let _ = self
+                        .artwork_mgr
+                        .request_artwork(&app_name, cover_url.as_deref(), true);
+                    self.say(format!("Refreshing cover artwork for {title}..."));
+                } else {
+                    self.say("No game selected to refresh artwork.");
+                }
+            }
             Intent::Char(_) | Intent::Backspace => {}
         }
     }
@@ -3203,6 +3260,9 @@ mod tests {
             active_verify: None,
             bg_action_rx: None,
             user_name: Some("TestUser".into()),
+            artwork_mgr: crate::artwork::ArtworkManager::new(),
+            picker: ratatui_image::picker::Picker::halfblocks(),
+            current_image_state: None,
         };
         app.apply_filter();
         app.update_selected_details();
@@ -3651,5 +3711,19 @@ mod tests {
                 || app.status.contains("store page")
                 || app.status.contains("Failed")
         );
+    }
+
+    #[test]
+    fn test_artwork_and_refresh_flow() {
+        let mut app = test_app();
+        app.selected = 1;
+        app.update_selected_details();
+        // Initial state before network fetch: no current image state
+        assert!(app.current_image_state.is_none());
+
+        // Pressing RefreshArtwork
+        app.handle(Intent::RefreshArtwork);
+        assert!(app.status.contains("Refreshing cover artwork"));
+        assert!(app.current_image_state.is_none());
     }
 }
