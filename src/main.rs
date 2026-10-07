@@ -11,6 +11,7 @@ mod launch;
 mod legendary;
 mod metadata;
 mod models;
+mod perf;
 mod prefix;
 mod process;
 mod proton;
@@ -130,6 +131,15 @@ fn to_intent(key: crossterm::event::KeyEvent, searching: bool, in_input: bool) -
 }
 
 fn main() {
+    perf::init_start_time();
+    filesystem::migrate_legacy_cache_if_needed();
+
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--art-report") {
+        artwork::run_art_report();
+        return;
+    }
+
     // Restore the terminal even on panic.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -297,27 +307,43 @@ fn run() -> Result<(), String> {
             term.draw(|f| ui::draw(f, &mut app))
                 .map_err(|e| format!("draw: {e}"))?;
             app.dirty = false;
-        }
-        if !event::poll(Duration::from_millis(100)).map_err(|e| format!("poll: {e}"))? {
-            continue;
-        }
-        let Event::Key(key) = event::read().map_err(|e| format!("read: {e}"))? else {
-            continue;
-        };
-        let in_input = app.in_input_mode();
-        let Some(intent) = to_intent(key, app.searching, in_input) else {
-            continue;
-        };
-        if matches!(intent, Intent::Quit) {
-            if app.active_install.is_some() {
-                app.handle(Intent::Quit);
-                app.dirty = true;
-                continue;
+            if !app.first_draw_done {
+                app.first_draw_done = true;
+                perf::log_first_draw();
+                app.on_first_draw();
             }
-            break;
         }
-        app.handle(intent);
-        app.dirty = true;
+        let poll_timeout = if app.has_pending_work() {
+            Duration::from_millis(8)
+        } else {
+            Duration::from_millis(50)
+        };
+        if !event::poll(poll_timeout).map_err(|e| format!("poll: {e}"))? {
+            continue;
+        }
+        match event::read().map_err(|e| format!("read: {e}"))? {
+            Event::Key(key) => {
+                let in_input = app.in_input_mode();
+                let Some(intent) = to_intent(key, app.searching, in_input) else {
+                    continue;
+                };
+                if matches!(intent, Intent::Quit) {
+                    if app.active_install.is_some() {
+                        app.handle(Intent::Quit);
+                        app.dirty = true;
+                        continue;
+                    }
+                    break;
+                }
+                app.handle(intent);
+                app.dirty = true;
+            }
+            Event::Resize(w, _h) => {
+                app.terminal_width = w;
+                app.dirty = true;
+            }
+            _ => {}
+        }
         if app.suspended {
             // A foreground child ran: re-enter alt screen + raw mode exactly once.
             enable_raw_mode().map_err(|e| format!("raw mode: {e}"))?;

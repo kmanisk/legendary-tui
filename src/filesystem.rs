@@ -28,15 +28,59 @@ pub fn cache_file() -> PathBuf {
 
 /// `~/.cache/legendary-tui/`
 pub fn cache_dir() -> PathBuf {
-    let p = home().join(".cache/legendary-tui");
-    if p.exists() {
-        return p;
-    }
+    home().join(".cache/legendary-tui")
+}
+
+/// One-time migration of legacy `~/.cache/egs` into `~/.cache/legendary-tui`.
+/// Copies or moves images, metadata, and files so no files need re-downloading.
+pub fn migrate_legacy_cache_if_needed() {
     let legacy = home().join(".cache/egs");
+    let current = cache_dir();
     if legacy.exists() {
-        return legacy;
+        let _ = ensure_dir(&current);
+
+        // Migrate images directory
+        let legacy_images = legacy.join("images");
+        let current_images = image_cache_dir();
+        if legacy_images.exists() {
+            let _ = ensure_dir(&current_images);
+            if let Ok(entries) = std::fs::read_dir(&legacy_images) {
+                for entry in entries.flatten() {
+                    let dest = current_images.join(entry.file_name());
+                    if !dest.exists() {
+                        let _ = std::fs::rename(entry.path(), &dest)
+                            .or_else(|_| std::fs::copy(entry.path(), &dest).map(|_| ()));
+                    }
+                }
+            }
+        }
+
+        // Migrate metadata directory
+        let legacy_meta = legacy.join("metadata");
+        let current_meta = metadata_cache_dir();
+        if legacy_meta.exists() {
+            let _ = ensure_dir(&current_meta);
+            if let Ok(entries) = std::fs::read_dir(&legacy_meta) {
+                for entry in entries.flatten() {
+                    let dest = current_meta.join(entry.file_name());
+                    if !dest.exists() {
+                        let _ = std::fs::rename(entry.path(), &dest)
+                            .or_else(|_| std::fs::copy(entry.path(), &dest).map(|_| ()));
+                    }
+                }
+            }
+        }
+
+        // Migrate root cache files
+        for name in &["library.json", "updates.json", "protondb.json"] {
+            let src = legacy.join(name);
+            let dst = current.join(name);
+            if src.exists() && !dst.exists() {
+                let _ =
+                    std::fs::rename(&src, &dst).or_else(|_| std::fs::copy(&src, &dst).map(|_| ()));
+            }
+        }
     }
-    p
 }
 
 /// `~/.local/share/legendary/compatdata/`
@@ -60,6 +104,58 @@ pub fn prefixes_dir() -> PathBuf {
 /// Metadata cache directory: `~/.cache/legendary-tui/metadata/`
 pub fn metadata_cache_dir() -> PathBuf {
     cache_dir().join("metadata")
+}
+
+/// Manifest & game info cache directory: `~/.cache/legendary-tui/info/`
+pub fn info_cache_dir() -> PathBuf {
+    cache_dir().join("info")
+}
+
+/// Available disk space in bytes for the filesystem containing `path`.
+pub fn available_disk_space(path: &std::path::Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    #[repr(C)]
+    struct Statvfs {
+        f_bsize: std::os::raw::c_ulong,
+        f_frsize: std::os::raw::c_ulong,
+        f_blocks: u64,
+        f_bfree: u64,
+        f_bavail: u64,
+        f_files: u64,
+        f_ffree: u64,
+        f_favail: u64,
+        f_fsid: std::os::raw::c_ulong,
+        f_flag: std::os::raw::c_ulong,
+        f_namemax: std::os::raw::c_ulong,
+        __f_spare: [std::os::raw::c_int; 6],
+    }
+
+    extern "C" {
+        fn statvfs(path: *const std::os::raw::c_char, buf: *mut Statvfs) -> std::os::raw::c_int;
+    }
+
+    let mut check_path = path.to_path_buf();
+    while !check_path.exists() {
+        if !check_path.pop() {
+            return None;
+        }
+    }
+
+    let c_path = CString::new(check_path.as_os_str().as_bytes()).ok()?;
+    let mut stat: Statvfs = unsafe { std::mem::zeroed() };
+    let res = unsafe { statvfs(c_path.as_ptr(), &mut stat) };
+    if res == 0 {
+        let frsize = if stat.f_frsize > 0 {
+            stat.f_frsize as u64
+        } else {
+            stat.f_bsize as u64
+        };
+        Some(stat.f_bavail * frsize)
+    } else {
+        None
+    }
 }
 
 /// Artwork image cache directory: `~/.cache/legendary-tui/images/`

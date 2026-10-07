@@ -60,6 +60,8 @@ pub struct GameDetails {
     #[serde(default)]
     pub manifest_cached: bool,
     #[serde(default)]
+    pub manifest_loading: bool,
+    #[serde(default)]
     pub protondb_tier: Option<String>,
     #[serde(default)]
     pub needs_update: bool,
@@ -67,6 +69,32 @@ pub struct GameDetails {
     pub available_version: Option<String>,
     #[serde(default)]
     pub cover_url: Option<String>,
+    #[serde(default)]
+    pub external_activation: Option<String>,
+    #[serde(default)]
+    pub third_party_managed: Option<String>,
+    #[serde(default)]
+    pub store_slug: Option<String>,
+    #[serde(default)]
+    pub num_files: Option<usize>,
+}
+
+/// On-disk cache entry for manifest and store info (~/.cache/legendary-tui/info/<app_name>.json).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ManifestCacheEntry {
+    pub schema_version: u32,
+    pub app_name: String,
+    pub version: Option<String>,
+    pub download_size: Option<u64>,
+    pub disk_size: Option<u64>,
+    pub launch_exe: Option<String>,
+    #[serde(default)]
+    pub prerequisites: Vec<String>,
+    pub num_files: Option<usize>,
+    pub cloud_save_folder: Option<String>,
+    pub description: Option<String>,
+    pub store_slug: Option<String>,
+    pub fetched_at: u64,
 }
 
 /// Relevance score for search ranking: exact > prefix > substring > fuzzy.

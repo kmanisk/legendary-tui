@@ -15,6 +15,7 @@ pub struct Theme {
     pub bg2: Color,
     pub fg: Color,
     pub accent: Color,
+    #[allow(dead_code)]
     pub sel: Color,
     pub muted: Color,
     pub red: Color,

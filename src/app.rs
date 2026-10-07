@@ -2,6 +2,7 @@
 //! All destructive paths go through explicit confirm screens and fail closed.
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use crate::input::Intent;
 use crate::install::{ActiveInstall, ActiveVerify, InstallProgress};
@@ -112,6 +113,7 @@ pub struct App {
     pub searching: bool,
     mode: Mode,
     pub status: String,
+    pub status_set_at: Option<std::time::Instant>,
     pub cfg: config::Config,
     prefix_sizes: HashMap<String, u64>,
     rofi_entries: Vec<rofi::Entry>,
@@ -137,6 +139,21 @@ pub struct App {
     pub(crate) artwork_mgr: crate::artwork::ArtworkManager,
     pub(crate) picker: ratatui_image::picker::Picker,
     pub(crate) current_image_state: Option<ratatui_image::protocol::StatefulProtocol>,
+    pub(crate) current_image_size: Option<(u32, u32)>,
+    pub(crate) cover_state: crate::artwork::CoverState,
+    pub(crate) cover_source: Option<String>,
+    pub(crate) active_art_request_id: u64,
+    pub(crate) terminal_width: u16,
+    pub(crate) first_draw_done: bool,
+    pub(crate) resize_rx: std::sync::mpsc::Receiver<
+        Result<ratatui_image::thread::ResizeResponse, ratatui_image::errors::Errors>,
+    >,
+    pub(crate) thread_protocol: ratatui_image::thread::ThreadProtocol,
+    pub(crate) selection_settled_at: Option<std::time::Instant>,
+    pub(crate) pending_settle_app: Option<String>,
+    pub(crate) manifest_settled_at: Option<std::time::Instant>,
+    pub(crate) pending_store_open: Option<(String, String)>,
+    pub(crate) last_progress_ui_update: std::time::Instant,
 }
 
 type LibraryResult = Result<Vec<(String, String)>, String>;
@@ -167,8 +184,38 @@ impl Filter {
     }
 }
 
+fn create_thread_protocol() -> (
+    std::sync::mpsc::Receiver<
+        Result<ratatui_image::thread::ResizeResponse, ratatui_image::errors::Errors>,
+    >,
+    ratatui_image::thread::ThreadProtocol,
+) {
+    let (tx_worker, rx_worker) = std::sync::mpsc::channel::<ratatui_image::thread::ResizeRequest>();
+    let (tx_res, rx_res) = std::sync::mpsc::channel();
+    let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel_clone = std::sync::Arc::clone(&cancel_flag);
+
+    let _ = std::thread::Builder::new()
+        .name("img-resizer".into())
+        .spawn(move || {
+            while let Ok(req) = rx_worker.recv() {
+                if cancel_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                let res = req.resize_encode();
+                let _ = tx_res.send(res);
+            }
+        });
+
+    (
+        rx_res,
+        ratatui_image::thread::ThreadProtocol::new(tx_worker, None),
+    )
+}
+
 impl App {
     pub fn new() -> Result<Self, String> {
+        let (rx_resize, thread_protocol) = create_thread_protocol();
         let cfg = config::load();
         // Cache-first for instant startup; refresh only on demand.
         let cached = cache::load();
@@ -191,6 +238,7 @@ impl App {
             searching: false,
             mode: Mode::Library,
             status: String::new(),
+            status_set_at: None,
             cfg,
             prefix_sizes: HashMap::new(),
             rofi_entries: Vec::new(),
@@ -214,6 +262,19 @@ impl App {
             artwork_mgr: crate::artwork::ArtworkManager::new(),
             picker: ratatui_image::picker::Picker::halfblocks(),
             current_image_state: None,
+            current_image_size: None,
+            cover_state: crate::artwork::CoverState::Idle,
+            cover_source: None,
+            active_art_request_id: 0,
+            terminal_width: 120,
+            first_draw_done: false,
+            resize_rx: rx_resize,
+            thread_protocol,
+            selection_settled_at: None,
+            pending_settle_app: None,
+            manifest_settled_at: None,
+            pending_store_open: None,
+            last_progress_ui_update: std::time::Instant::now(),
         };
         app.set_library(lib);
         app.refresh_installed()?;
@@ -227,9 +288,80 @@ impl App {
 
     pub fn set_picker(&mut self, picker: ratatui_image::picker::Picker) {
         self.picker = picker;
+        self.artwork_mgr.clear_lru_protocols();
         if let Some(details) = &self.selected_details {
-            if let Some(img) = self.artwork_mgr.get_cached(&details.app_name) {
-                self.current_image_state = Some(self.picker.new_resize_protocol((*img).clone()));
+            if let Some((img, _)) = self.artwork_mgr.get_cached(&details.app_name) {
+                self.current_image_size = Some((img.width(), img.height()));
+                let proto = self.picker.new_resize_protocol((*img).clone());
+                self.thread_protocol.replace_protocol(proto);
+                self.current_image_state = None;
+            }
+        }
+    }
+
+    pub fn has_pending_work(&self) -> bool {
+        self.pending_settle_app.is_some()
+            || self.refreshing
+            || self.active_install.is_some()
+            || self.artwork_mgr.prefetch_progress().is_some()
+    }
+
+    pub fn on_first_draw(&mut self) {
+        self.artwork_mgr.build_cache_index();
+
+        let neighbors = self.collect_neighbors(self.selected, 5);
+        self.artwork_mgr.queue_neighbors(&neighbors);
+
+        let all_games: Vec<(String, String, Option<String>)> = self
+            .games
+            .iter()
+            .map(|g| {
+                let d = self.metadata_mgr.get_cached(&g.app_name);
+                let cover_url = d.and_then(|det| det.cover_url);
+                (g.app_name.clone(), g.title.clone(), cover_url)
+            })
+            .collect();
+        self.artwork_mgr.queue_prefetch(&all_games);
+    }
+
+    pub fn collect_neighbors(
+        &self,
+        selected_idx: usize,
+        radius: usize,
+    ) -> Vec<(String, String, Option<String>)> {
+        let mut neighbors = Vec::new();
+        let total = self.filtered.len();
+        if total == 0 {
+            return neighbors;
+        }
+        let start = selected_idx.saturating_sub(radius);
+        let end = (selected_idx + radius).min(total.saturating_sub(1));
+        for i in start..=end {
+            if i != selected_idx {
+                if let Some(RowItem::Game(idx)) = self.filtered.get(i) {
+                    if let Some(g) = self.games.get(*idx) {
+                        let d = self.metadata_mgr.get_cached(&g.app_name);
+                        let cover_url = d.and_then(|det| det.cover_url);
+                        neighbors.push((g.app_name.clone(), g.title.clone(), cover_url));
+                    }
+                }
+            }
+        }
+        neighbors
+    }
+
+    pub fn check_bump_prefetch(&mut self) {
+        let total = self.filtered.len();
+        if total == 0 {
+            return;
+        }
+        let start = self.selected.saturating_sub(10);
+        let end = (self.selected + 10).min(total.saturating_sub(1));
+        for i in start..=end {
+            if let Some(RowItem::Game(idx)) = self.filtered.get(i) {
+                if let Some(g) = self.games.get(*idx) {
+                    self.artwork_mgr.bump_prefetch(&g.app_name);
+                }
             }
         }
     }
@@ -303,18 +435,172 @@ impl App {
     pub fn poll_tick(&mut self) -> bool {
         let mut updated = false;
 
+        // Auto-expire transient bottom bar status notification after 4 seconds
+        if let Some(t) = self.status_set_at {
+            if t.elapsed() >= std::time::Duration::from_secs(4) {
+                self.status.clear();
+                self.status_set_at = None;
+                updated = true;
+            }
+        }
+
         // 1. Poll metadata background fetch updates
         if self.metadata_mgr.poll_updates() {
             self.update_selected_details();
             updated = true;
         }
 
+        // Poll pending store page open
+        if let Some((ref app, ref title)) = self.pending_store_open.clone() {
+            if let Some(slug) = self.metadata_mgr.store_slugs_cache.get(app) {
+                if slug != "NONE" && !slug.is_empty() {
+                    let clean = slug.trim_end_matches("/home");
+                    let url = format!("https://store.epicgames.com/p/{clean}");
+                    self.spawn_browser(&url, &format!("Opened store page for '{title}'"));
+                } else {
+                    self.launch_store_search(title);
+                }
+                self.pending_store_open = None;
+                updated = true;
+            }
+        }
+
+        // Poll manifest debounce (~250 ms)
+        if let Some(settled_at) = self.manifest_settled_at {
+            if settled_at.elapsed() >= std::time::Duration::from_millis(250) {
+                let req_target = if let Some(g) = self.current() {
+                    if !g.installed {
+                        let d = self.current_details();
+                        let manifest_cached =
+                            d.as_ref().map(|x| x.manifest_cached).unwrap_or(false);
+                        let manifest_loading =
+                            d.as_ref().map(|x| x.manifest_loading).unwrap_or(false);
+                        if !manifest_cached && !manifest_loading {
+                            let version = g
+                                .version
+                                .clone()
+                                .or_else(|| d.as_ref().and_then(|x| x.version.clone()));
+                            Some((g.app_name.clone(), g.title.clone(), version))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if let Some((app_name, title, version)) = req_target {
+                    self.metadata_mgr.request_manifest_if_needed(
+                        &app_name,
+                        &title,
+                        version.as_deref(),
+                    );
+                    let neighbors = self.collect_neighbors(self.selected, 2);
+                    for (neighbor_app, neighbor_title, _) in neighbors {
+                        let should_req = if let Some(ng) =
+                            self.games.iter().find(|x| x.app_name == neighbor_app)
+                        {
+                            if !ng.installed {
+                                let nd = self.metadata_mgr.get_cached(&ng.app_name);
+                                let n_cached =
+                                    nd.as_ref().map(|x| x.manifest_cached).unwrap_or(false);
+                                let n_loading =
+                                    nd.as_ref().map(|x| x.manifest_loading).unwrap_or(false);
+                                if !n_cached && !n_loading {
+                                    Some((
+                                        neighbor_app.clone(),
+                                        neighbor_title.clone(),
+                                        ng.version.clone(),
+                                    ))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some((n_app, n_title, n_ver)) = should_req {
+                            self.metadata_mgr.request_manifest_if_needed(
+                                &n_app,
+                                &n_title,
+                                n_ver.as_deref(),
+                            );
+                        }
+                    }
+                }
+                self.manifest_settled_at = None;
+            }
+        }
+
+        // Poll resize worker
+        while let Ok(res) = self.resize_rx.try_recv() {
+            if let Ok(completed) = res {
+                if self.thread_protocol.update_resized_protocol(completed) {
+                    updated = true;
+                }
+            }
+        }
+
+        // Poll navigation debounce (~60 ms)
+        if let Some(settled_at) = self.selection_settled_at {
+            if settled_at.elapsed() >= std::time::Duration::from_millis(60) {
+                if let Some(app) = self.pending_settle_app.take() {
+                    let title = self.title_of(&app);
+                    let cover_url = self
+                        .selected_details
+                        .as_ref()
+                        .and_then(|d| d.cover_url.clone());
+                    let (req_id, state, img_opt, src_opt) =
+                        self.artwork_mgr
+                            .request_artwork(&app, &title, cover_url.as_deref(), false);
+                    self.active_art_request_id = req_id;
+                    self.cover_state = state;
+                    self.cover_source = src_opt;
+                    if let Some(img) = img_opt {
+                        self.current_image_size = Some((img.width(), img.height()));
+                        let proto = self.picker.new_resize_protocol((*img).clone());
+                        self.thread_protocol.replace_protocol(proto);
+                        self.current_image_state = None;
+                    }
+                    let neighbors = self.collect_neighbors(self.selected, 5);
+                    self.artwork_mgr.queue_neighbors(&neighbors);
+                    self.check_bump_prefetch();
+                    updated = true;
+                }
+                self.selection_settled_at = None;
+            }
+        }
+
         // Poll artwork manager updates
-        if self.artwork_mgr.poll_updates() {
+        while let Some(resp) = self.artwork_mgr.try_recv() {
             if let Some(details) = &self.selected_details {
-                if let Some(img) = self.artwork_mgr.get_cached(&details.app_name) {
-                    self.current_image_state =
-                        Some(self.picker.new_resize_protocol((*img).clone()));
+                if resp.app_name == details.app_name
+                    && resp.request_id == self.active_art_request_id
+                {
+                    self.cover_source = resp.source;
+                    match resp.result {
+                        Ok(img) => {
+                            self.cover_state = crate::artwork::CoverState::Ready;
+                            self.current_image_size = Some((img.width(), img.height()));
+                            let proto = self.picker.new_resize_protocol((*img).clone());
+                            self.thread_protocol.replace_protocol(proto);
+                            self.current_image_state = None;
+                        }
+                        Err(err) => {
+                            self.current_image_size = None;
+                            self.current_image_state = None;
+                            self.thread_protocol.empty_protocol();
+                            if resp.is_no_artwork {
+                                self.cover_state = crate::artwork::CoverState::NoArtwork;
+                            } else {
+                                self.cover_state = crate::artwork::CoverState::Failed(err);
+                            }
+                        }
+                    }
                     updated = true;
                 }
             }
@@ -344,8 +630,11 @@ impl App {
                 Ok(None) => {
                     if let Mode::Install(ref mut p) = self.mode {
                         *p = inst.progress.clone();
+                        updated = true;
+                    } else if self.last_progress_ui_update.elapsed() >= Duration::from_millis(250) {
+                        self.last_progress_ui_update = Instant::now();
+                        updated = true;
                     }
-                    updated = true;
                 }
                 Err(e) => {
                     let title = inst.title.clone();
@@ -519,24 +808,59 @@ impl App {
                 }
             }
             if let Some(details) = &d {
-                let img_opt = self.artwork_mgr.request_artwork(
-                    &details.app_name,
-                    details.cover_url.as_deref(),
-                    false,
-                );
-                if let Some(img) = img_opt {
-                    self.current_image_state =
-                        Some(self.picker.new_resize_protocol((*img).clone()));
-                } else if !self.artwork_mgr.is_pending(&details.app_name) {
+                let app_name = &details.app_name;
+
+                // 1. In-memory LRU fast path (0 ms)
+                if let Some((img, src)) = self.artwork_mgr.get_cached(app_name) {
+                    self.cover_state = crate::artwork::CoverState::Ready;
+                    self.cover_source = src;
+                    self.current_image_size = Some((img.width(), img.height()));
+                    let proto = self.picker.new_resize_protocol((*img).clone());
+                    self.thread_protocol.replace_protocol(proto);
                     self.current_image_state = None;
+                    self.pending_settle_app = None;
+                    self.selection_settled_at = None;
+                }
+                // 2. In-memory CacheIndex negative check (0 ms, zero FS calls)
+                else if self.artwork_mgr.is_negative_cached(app_name) {
+                    self.cover_state = crate::artwork::CoverState::NoArtwork;
+                    self.cover_source = None;
+                    self.current_image_size = None;
+                    self.current_image_state = None;
+                    self.thread_protocol.empty_protocol();
+                    self.pending_settle_app = None;
+                    self.selection_settled_at = None;
+                }
+                // 3. Cached on disk or uncached: debounce 60 ms
+                else {
+                    self.cover_state = crate::artwork::CoverState::Loading;
+                    self.cover_source = None;
+                    self.current_image_size = None;
+                    self.current_image_state = None;
+                    self.thread_protocol.empty_protocol();
+                    self.pending_settle_app = Some(app_name.clone());
+                    self.selection_settled_at = Some(std::time::Instant::now());
                 }
             } else {
+                self.cover_state = crate::artwork::CoverState::Idle;
+                self.cover_source = None;
+                self.current_image_size = None;
                 self.current_image_state = None;
+                self.thread_protocol.empty_protocol();
+                self.pending_settle_app = None;
+                self.selection_settled_at = None;
             }
+            self.manifest_settled_at = Some(std::time::Instant::now());
             self.selected_details = d;
         } else {
+            self.cover_state = crate::artwork::CoverState::Idle;
+            self.cover_source = None;
             self.selected_details = None;
             self.current_image_state = None;
+            self.thread_protocol.empty_protocol();
+            self.pending_settle_app = None;
+            self.selection_settled_at = None;
+            self.manifest_settled_at = None;
         }
     }
 
@@ -581,14 +905,23 @@ impl App {
         }
 
         let mut rows = Vec::new();
-        if !installed_rows.is_empty() {
-            rows.push(RowItem::Header("Installed Games", installed_rows.len()));
+        if self.filter != Filter::All {
+            if !installed_rows.is_empty() {
+                rows.push(RowItem::Header("Installed", installed_rows.len()));
+                for idx in installed_rows {
+                    rows.push(RowItem::Game(idx));
+                }
+            }
+            if !library_rows.is_empty() {
+                rows.push(RowItem::Header("Library", library_rows.len()));
+                for idx in library_rows {
+                    rows.push(RowItem::Game(idx));
+                }
+            }
+        } else {
             for idx in installed_rows {
                 rows.push(RowItem::Game(idx));
             }
-        }
-        if !library_rows.is_empty() {
-            rows.push(RowItem::Header("Library", library_rows.len()));
             for idx in library_rows {
                 rows.push(RowItem::Game(idx));
             }
@@ -664,6 +997,7 @@ impl App {
         self.update_selected_details();
     }
 
+    #[allow(dead_code)]
     pub fn status_line(&self) -> String {
         let mut dl_info = String::new();
         if let Some(inst) = &self.active_install {
@@ -728,6 +1062,7 @@ impl App {
 
     fn say(&mut self, msg: impl Into<String>) {
         self.status = msg.into();
+        self.status_set_at = Some(std::time::Instant::now());
         self.dirty = true;
     }
 
@@ -763,23 +1098,51 @@ impl App {
 
     pub(crate) fn open_store_page_for(&mut self, app_name: &str) {
         let title = self.title_of(app_name);
-        self.launch_store_url(&title);
+        self.launch_store(app_name, &title);
     }
 
     pub(crate) fn open_store_page(&mut self) {
         if let Some(game) = self.current() {
+            let app_name = game.app_name.clone();
             let title = game.title.clone();
-            self.launch_store_url(&title);
+            self.launch_store(&app_name, &title);
         } else {
             self.say("Select a game first.");
         }
     }
 
-    fn launch_store_url(&mut self, title: &str) {
+    fn launch_store(&mut self, app_name: &str, title: &str) {
         if title.is_empty() {
             self.say("No game title available.");
             return;
         }
+
+        let meta_slug = self
+            .selected_details
+            .as_ref()
+            .and_then(|d| d.store_slug.clone());
+
+        match self
+            .metadata_mgr
+            .resolve_store_slug(app_name, title, None, meta_slug.as_deref())
+        {
+            Ok(slug) => {
+                let clean = slug.trim_end_matches("/home");
+                let url = format!("https://store.epicgames.com/p/{clean}");
+                self.spawn_browser(&url, &format!("Opened store page for '{title}'"));
+            }
+            Err(is_in_flight) => {
+                if is_in_flight {
+                    self.pending_store_open = Some((app_name.to_string(), title.to_string()));
+                    self.say("Resolving store page...");
+                } else {
+                    self.launch_store_search(title);
+                }
+            }
+        }
+    }
+
+    fn launch_store_search(&mut self, title: &str) {
         let mut encoded = String::with_capacity(title.len() * 3);
         for b in title.bytes() {
             match b {
@@ -793,14 +1156,18 @@ impl App {
             }
         }
         let url = format!("https://store.epicgames.com/browse?q={encoded}");
+        self.spawn_browser(&url, "Opened store search (no direct page)");
+    }
+
+    fn spawn_browser(&mut self, url: &str, msg: &str) {
         match std::process::Command::new("xdg-open")
-            .arg(&url)
+            .arg(url)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
         {
-            Ok(_) => self.say(format!("Opened store page for '{title}'")),
+            Ok(_) => self.say(msg),
             Err(e) => self.say(format!("Failed to open browser: {e}")),
         }
     }
@@ -1739,12 +2106,26 @@ impl App {
             .get(app)
             .and_then(|g| g.lsfg.clone())
             .unwrap_or_else(|| self.cfg.lsfg_multiplier.clone());
-        let proton_str = self
-            .cfg
-            .games
-            .get(app)
-            .and_then(|g| g.proton.clone())
-            .unwrap_or_else(|| format!("Default ({})", self.cfg.default_proton));
+        let custom_proton = self.cfg.games.get(app).and_then(|g| g.proton.clone());
+        let pdb_tier = self
+            .selected_details
+            .as_ref()
+            .filter(|d| d.app_name == app)
+            .and_then(|d| d.protondb_tier.clone())
+            .or_else(|| {
+                self.metadata_mgr
+                    .get_protondb_tier(app)
+                    .map(|s| s.to_string())
+            });
+        let is_platinum = pdb_tier
+            .as_deref()
+            .map(|t| t.eq_ignore_ascii_case("platinum"))
+            .unwrap_or(false);
+        let proton_str = match custom_proton {
+            Some(p) => p,
+            None if is_platinum => "Not needed (Platinum)".to_string(),
+            None => format!("Default ({})", self.cfg.default_proton),
+        };
 
         let game_obj = self.games.iter().find(|g| g.app_name == app);
         let has_update = game_obj.map(|g| g.needs_update).unwrap_or(false);
@@ -2304,6 +2685,13 @@ impl App {
             }
         }
 
+        if let Mode::Details(_) = self.mode {
+            if matches!(intent, Intent::Enter | Intent::Cancel) {
+                self.mode = Mode::Library;
+                return;
+            }
+        }
+
         match intent {
             Intent::Up => self.move_sel(-1),
             Intent::Down => self.move_sel(1),
@@ -2404,6 +2792,14 @@ impl App {
                         let n = self.selected_games.len();
                         self.selected_games.clear();
                         self.say(format!("Deselected {n} games."));
+                    } else if !self.search.is_empty() {
+                        self.search.clear();
+                        self.apply_filter();
+                        self.update_selected_details();
+                    } else if !self.status.is_empty() {
+                        self.status.clear();
+                        self.status_set_at = None;
+                        self.dirty = true;
                     }
                 }
                 _ => self.mode = Mode::Library,
@@ -2423,11 +2819,25 @@ impl App {
                     let title = details.title.clone();
                     let app_name = details.app_name.clone();
                     let cover_url = details.cover_url.clone();
-                    self.artwork_mgr.invalidate(&app_name);
-                    self.current_image_state = None;
-                    let _ = self
-                        .artwork_mgr
-                        .request_artwork(&app_name, cover_url.as_deref(), true);
+                    let (req_id, state, img_opt, src_opt) = self.artwork_mgr.request_artwork(
+                        &app_name,
+                        &title,
+                        cover_url.as_deref(),
+                        true,
+                    );
+                    self.active_art_request_id = req_id;
+                    self.cover_state = state;
+                    self.cover_source = src_opt;
+                    if let Some(img) = img_opt {
+                        self.current_image_size = Some((img.width(), img.height()));
+                        let proto = self.picker.new_resize_protocol((*img).clone());
+                        self.thread_protocol.replace_protocol(proto);
+                        self.current_image_state = None;
+                    } else {
+                        self.current_image_size = None;
+                        self.current_image_state = None;
+                        self.thread_protocol.empty_protocol();
+                    }
                     self.say(format!("Refreshing cover artwork for {title}..."));
                 } else {
                     self.say("No game selected to refresh artwork.");
@@ -2528,6 +2938,10 @@ impl App {
         let Some(g) = self.current().cloned() else {
             return;
         };
+        if self.terminal_width < 70 && self.selected_games.is_empty() {
+            self.mode = Mode::Details(g.app_name);
+            return;
+        }
         if g.installed {
             self.mode = Mode::Menu(self.installed_menu(&g.app_name));
         } else if self.active_install.as_ref().map(|i| &i.app_name) == Some(&g.app_name) {
@@ -2587,18 +3001,37 @@ impl App {
             } else {
                 "Note: Download will run in the background."
             };
+            let free_space = crate::filesystem::available_disk_space(std::path::Path::new(&base));
+            let free_str = free_space
+                .map(prefix::fmt_size)
+                .unwrap_or_else(|| "unknown".into());
+            let is_low_space = match (details.and_then(|d| d.installed_size), free_space) {
+                (Some(req), Some(free)) => req > free,
+                _ => false,
+            };
+
+            let mut confirm_lines = vec![
+                prompt_title,
+                "".into(),
+                format!("Target location: {target_dir}"),
+                format!("Download size:   {dl_str}"),
+                format!("Installed size:  {inst_str}"),
+                format!("Free space:      {free_str}"),
+            ];
+
+            if is_low_space {
+                confirm_lines.push("".into());
+                confirm_lines.push(format!(
+                    "WARNING: Required space ({inst_str}) exceeds free space ({free_str})!"
+                ));
+            }
+
+            confirm_lines.push("".into());
+            confirm_lines.push(queue_note.into());
+            confirm_lines.push("Proceed?".into());
 
             self.mode = Mode::Confirm {
-                lines: vec![
-                    prompt_title,
-                    "".into(),
-                    format!("Target location: {target_dir}"),
-                    format!("Download size:   {dl_str}"),
-                    format!("Installed size:  {inst_str}"),
-                    "".into(),
-                    queue_note.into(),
-                    "Proceed?".into(),
-                ],
+                lines: confirm_lines,
                 op: Op::StartInstall(g.app_name),
             };
         }
@@ -2907,27 +3340,45 @@ impl App {
                     }
                     Op::SetPerGamePrefix(app) => {
                         if value.is_empty() {
-                            self.cfg.games.entry(app).or_default().prefix_path = None;
+                            self.cfg.games.entry(app.clone()).or_default().prefix_path = None;
                             let _ = config::save(&self.cfg);
                             self.say("Custom prefix cleared (using default).");
                         } else {
-                            self.cfg.games.entry(app).or_default().prefix_path = Some(value);
+                            self.cfg.games.entry(app.clone()).or_default().prefix_path =
+                                Some(value);
                             let _ = config::save(&self.cfg);
                             self.say("Per-game prefix saved.");
                         }
-                        self.mode = Mode::Library;
+                        let mut m = self.installed_menu(&app);
+                        if let Some(pos) = m
+                            .items
+                            .iter()
+                            .position(|(_, o)| matches!(o, Op::SetPerGamePrefix(_)))
+                        {
+                            m.idx = pos;
+                        }
+                        self.mode = Mode::Menu(m);
                     }
                     Op::SetPerGameLaunchArgs(app) => {
                         if value.is_empty() {
-                            self.cfg.games.entry(app).or_default().launch_args = None;
+                            self.cfg.games.entry(app.clone()).or_default().launch_args = None;
                             let _ = config::save(&self.cfg);
                             self.say("Launch arguments cleared.");
                         } else {
-                            self.cfg.games.entry(app).or_default().launch_args = Some(value);
+                            self.cfg.games.entry(app.clone()).or_default().launch_args =
+                                Some(value);
                             let _ = config::save(&self.cfg);
                             self.say("Launch arguments saved.");
                         }
-                        self.mode = Mode::Library;
+                        let mut m = self.installed_menu(&app);
+                        if let Some(pos) = m
+                            .items
+                            .iter()
+                            .position(|(_, o)| matches!(o, Op::SetPerGameLaunchArgs(_)))
+                        {
+                            m.idx = pos;
+                        }
+                        self.mode = Mode::Menu(m);
                     }
                     Op::PromptImportGame(app) => {
                         let val = value.trim().to_string();
@@ -2945,9 +3396,33 @@ impl App {
                 }
                 return;
             }
-            Intent::Cancel => {
-                self.mode = Mode::Library;
-            }
+            Intent::Cancel => match &op {
+                Op::SetPerGameLaunchArgs(app) => {
+                    let mut m = self.installed_menu(app);
+                    if let Some(pos) = m
+                        .items
+                        .iter()
+                        .position(|(_, o)| matches!(o, Op::SetPerGameLaunchArgs(_)))
+                    {
+                        m.idx = pos;
+                    }
+                    self.mode = Mode::Menu(m);
+                }
+                Op::SetPerGamePrefix(app) => {
+                    let mut m = self.installed_menu(app);
+                    if let Some(pos) = m
+                        .items
+                        .iter()
+                        .position(|(_, o)| matches!(o, Op::SetPerGamePrefix(_)))
+                    {
+                        m.idx = pos;
+                    }
+                    self.mode = Mode::Menu(m);
+                }
+                _ => {
+                    self.mode = Mode::Library;
+                }
+            },
             _ => {}
         }
         let _ = title;
@@ -3199,10 +3674,11 @@ impl App {
 pub(crate) use Mode as AppMode;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn test_app() -> App {
+    pub(crate) fn test_app() -> App {
+        let (rx_resize, thread_protocol) = create_thread_protocol();
         let mut app = App {
             games: vec![
                 Game {
@@ -3240,6 +3716,7 @@ mod tests {
             searching: false,
             mode: Mode::Library,
             status: String::new(),
+            status_set_at: None,
             cfg: config::Config::default(),
             prefix_sizes: HashMap::new(),
             rofi_entries: Vec::new(),
@@ -3248,7 +3725,7 @@ mod tests {
             filter: Filter::All,
             pending_g: false,
             theme: crate::theme::load(),
-            last_theme_mtime: None,
+            last_theme_mtime: crate::theme::theme_mtime(),
             metadata_mgr: metadata::MetadataManager::new(),
             active_install: None,
             selected_details: None,
@@ -3263,6 +3740,19 @@ mod tests {
             artwork_mgr: crate::artwork::ArtworkManager::new(),
             picker: ratatui_image::picker::Picker::halfblocks(),
             current_image_state: None,
+            current_image_size: None,
+            cover_state: crate::artwork::CoverState::Idle,
+            cover_source: None,
+            active_art_request_id: 0,
+            terminal_width: 120,
+            first_draw_done: false,
+            resize_rx: rx_resize,
+            thread_protocol,
+            selection_settled_at: None,
+            pending_settle_app: None,
+            manifest_settled_at: None,
+            pending_store_open: None,
+            last_progress_ui_update: std::time::Instant::now(),
         };
         app.apply_filter();
         app.update_selected_details();
@@ -3285,51 +3775,50 @@ mod tests {
     #[test]
     fn navigation_and_bounds() {
         let mut app = test_app();
-        // Index 0: Header("Installed Games", 1)
-        // Index 1: Game(Beta)
-        // Index 2: Header("Library", 2)
-        // Index 3: Game(Alpha)
-        // Index 4: Game(Gamma)
-        assert_eq!(app.selected, 1);
+        // In Filter::All, installed games sort first without section headers:
+        // Index 0: Game(Beta)
+        // Index 1: Game(Alpha)
+        // Index 2: Game(Gamma)
+        assert_eq!(app.selected, 0);
         assert_eq!(app.current().unwrap().app_name, "app2");
 
-        app.handle(Intent::Down); // skips header at index 2, lands on index 3
-        assert_eq!(app.selected, 3);
+        app.handle(Intent::Down); // lands on index 1
+        assert_eq!(app.selected, 1);
         assert_eq!(app.current().unwrap().app_name, "app1");
 
-        app.handle(Intent::Down); // lands on index 4
-        assert_eq!(app.selected, 4);
+        app.handle(Intent::Down); // lands on index 2
+        assert_eq!(app.selected, 2);
         assert_eq!(app.current().unwrap().app_name, "app3");
 
-        app.handle(Intent::Down); // wrap around, skips header 0, lands on 1
-        assert_eq!(app.selected, 1);
+        app.handle(Intent::Down); // wrap around to index 0
+        assert_eq!(app.selected, 0);
         assert_eq!(app.current().unwrap().app_name, "app2");
 
-        app.handle(Intent::Up); // wrap around to index 4
-        assert_eq!(app.selected, 4);
+        app.handle(Intent::Up); // wrap around to index 2
+        assert_eq!(app.selected, 2);
         assert_eq!(app.current().unwrap().app_name, "app3");
 
         app.handle(Intent::First);
-        assert_eq!(app.selected, 1);
+        assert_eq!(app.selected, 0);
         assert_eq!(app.current().unwrap().app_name, "app2");
 
         app.handle(Intent::Last);
-        assert_eq!(app.selected, 4);
+        assert_eq!(app.selected, 2);
         assert_eq!(app.current().unwrap().app_name, "app3");
     }
 
     #[test]
     fn deterministic_gg() {
         let mut app = test_app();
-        app.selected = 4;
+        app.selected = 2;
 
         // First 'g' arms pending_g
         app.handle(Intent::First);
         assert!(app.pending_g);
-        assert_eq!(app.selected, 1);
+        assert_eq!(app.selected, 0);
 
         // Another key resets pending_g
-        app.selected = 4;
+        app.selected = 2;
         app.handle(Intent::Down);
         assert!(!app.pending_g);
 
@@ -3338,14 +3827,14 @@ mod tests {
         assert!(app.pending_g);
         app.handle(Intent::First);
         assert!(!app.pending_g);
-        assert_eq!(app.selected, 1);
+        assert_eq!(app.selected, 0);
     }
 
     #[test]
     fn filter_cycling() {
         let mut app = test_app();
         assert_eq!(app.filter, Filter::All);
-        assert_eq!(app.filtered.len(), 5);
+        assert_eq!(app.filtered.len(), 3);
 
         app.handle(Intent::FilterCycle);
         assert_eq!(app.filter, Filter::Installed);
@@ -3359,32 +3848,32 @@ mod tests {
 
         app.handle(Intent::FilterCycle);
         assert_eq!(app.filter, Filter::All);
-        assert_eq!(app.filtered.len(), 5);
+        assert_eq!(app.filtered.len(), 3);
     }
 
     #[test]
     fn toggle_select_flow() {
         let mut app = test_app();
         assert!(app.selected_games.is_empty());
-        app.selected = 3; // Alpha (uninstalled)
+        app.selected = 1; // Alpha (uninstalled)
         assert_eq!(app.current().unwrap().app_name, "app1");
 
-        // Pressing Tab toggles selection on game 3 (Alpha) and advances to 4 (Gamma)
+        // Pressing Tab toggles selection on game 1 (Alpha) and advances to 2 (Gamma)
         app.handle(Intent::ToggleSelect);
         assert_eq!(app.selected_games.len(), 1);
         assert!(app.selected_games.contains("app1"));
-        assert_eq!(app.selected, 4);
+        assert_eq!(app.selected, 2);
         assert_eq!(app.current().unwrap().app_name, "app3");
 
-        // Move to Beta (installed, index 1)
-        app.selected = 1;
+        // Move to Beta (installed, index 0)
+        app.selected = 0;
         // Pressing Tab on Beta (installed) while Alpha (uninstalled) is selected is blocked by guardrail!
         app.handle(Intent::ToggleSelect);
         assert_eq!(app.selected_games.len(), 1);
         assert!(app.status.contains("Cannot mix"));
 
-        // Move to game 4 (Gamma, uninstalled) and press Tab -> succeeds!
-        app.selected = 4;
+        // Move to game 2 (Gamma, uninstalled) and press Tab -> succeeds!
+        app.selected = 2;
         app.handle(Intent::ToggleSelect);
         assert_eq!(app.selected_games.len(), 2);
 
@@ -3398,12 +3887,12 @@ mod tests {
 
         // Reset and test installed guardrail
         let mut app2 = test_app();
-        app2.selected = 1; // Beta (installed)
+        app2.selected = 0; // Beta (installed)
         app2.handle(Intent::ToggleSelect);
         assert_eq!(app2.selected_games.len(), 1);
 
         // Attempting to select Alpha (uninstalled) while Beta (installed) is selected is blocked
-        app2.selected = 3;
+        app2.selected = 1;
         app2.handle(Intent::ToggleSelect);
         assert_eq!(app2.selected_games.len(), 1);
         assert!(app2.status.contains("Cannot mix"));
@@ -3439,7 +3928,7 @@ mod tests {
     #[test]
     fn menu_adjust_flow() {
         let mut app = test_app();
-        app.selected = 1; // Beta (installed)
+        app.selected = 0; // Beta (installed)
         app.handle(Intent::Enter);
         assert!(matches!(app.mode, Mode::Menu(_)));
 
@@ -3508,7 +3997,7 @@ mod tests {
     #[test]
     fn move_game_menu_option() {
         let mut app = test_app();
-        app.selected = 1; // Beta (installed)
+        app.selected = 0; // Beta (installed)
 
         // Settings menu shows "Move game location (Game Beta)"
         let settings = app.settings_menu();
@@ -3523,8 +4012,8 @@ mod tests {
             lbl.contains("Move Game Location:") && matches!(op, Op::MoveGame(id) if id == "app2")
         }));
 
-        // When uninstalled game is selected (Alpha, index 3), settings menu shows "Set per-game install location"
-        app.selected = 3;
+        // When uninstalled game is selected (Alpha, index 1), settings menu shows "Set per-game install location"
+        app.selected = 1;
         let settings_uninstalled = app.settings_menu();
         assert!(settings_uninstalled.items.iter().any(|(lbl, op)| {
             lbl.contains("Set per-game install location (Game Alpha)")
@@ -3559,8 +4048,8 @@ mod tests {
     #[test]
     fn search_jumps_to_best_match_from_scrolled_position() {
         let mut app = test_app();
-        // Scroll down to the bottom (Game Gamma, index 4)
-        app.selected = 4;
+        // Scroll down to the bottom (Game Gamma, index 2)
+        app.selected = 2;
         assert_eq!(app.current().unwrap().title, "Game Gamma");
 
         // Start search and type "Alpha"
@@ -3574,7 +4063,7 @@ mod tests {
 
         // Selection must be pushed directly to the best matching game (Game Alpha)
         assert_eq!(app.current().unwrap().title, "Game Alpha");
-        assert_eq!(app.selected, 1);
+        assert_eq!(app.selected, 0);
 
         // Cancel clears search
         app.handle(Intent::Cancel);
@@ -3593,7 +4082,7 @@ mod tests {
     #[test]
     fn cloud_saves_menu_and_actions() {
         let mut app = test_app();
-        app.selected = 1; // "app1"
+        app.selected = 0; // "app2" (Beta, installed)
         app.handle(Intent::CloudSaves);
         assert!(matches!(app.mode, Mode::Menu(ref m) if matches!(m.kind, MenuKind::CloudSaves(_))));
 
@@ -3624,14 +4113,14 @@ mod tests {
     #[test]
     fn verify_game_confirmation_flow() {
         let mut app = test_app();
-        app.selected = 3; // "app1" is uninstalled
+        app.selected = 1; // "app1" is uninstalled
         app.handle(Intent::VerifyGame);
         // Uninstalled game shouldn't open verify confirm
         assert!(matches!(app.mode, Mode::Library));
         assert!(app.status.contains("Select an installed game"));
 
-        // Select installed game "app2" (index 1)
-        app.selected = 1;
+        // Select installed game "app2" (index 0)
+        app.selected = 0;
         app.handle(Intent::VerifyGame);
         assert!(
             matches!(app.mode, Mode::Confirm { ref op, .. } if matches!(op, Op::StartVerifyGame(_)))
@@ -3646,7 +4135,7 @@ mod tests {
     fn import_game_prompt_and_settings() {
         let mut app = test_app();
         // Trigger import from library
-        app.selected = 1;
+        app.selected = 0;
         app.handle(Intent::ImportGame);
         // If directory fzf returns None in test env, it falls back to input dialog
         assert!(
@@ -3704,7 +4193,7 @@ mod tests {
     #[test]
     fn open_store_page_flow() {
         let mut app = test_app();
-        app.selected = 1;
+        app.selected = 0;
         app.handle(Intent::OpenStore);
         assert!(
             app.status.contains("Game")
@@ -3716,7 +4205,7 @@ mod tests {
     #[test]
     fn test_artwork_and_refresh_flow() {
         let mut app = test_app();
-        app.selected = 1;
+        app.selected = 0;
         app.update_selected_details();
         // Initial state before network fetch: no current image state
         assert!(app.current_image_state.is_none());
@@ -3725,5 +4214,152 @@ mod tests {
         app.handle(Intent::RefreshArtwork);
         assert!(app.status.contains("Refreshing cover artwork"));
         assert!(app.current_image_state.is_none());
+    }
+
+    #[test]
+    fn test_transient_status_auto_expires_and_cancel_clears() {
+        let mut app = test_app();
+        app.say("Installed 20 Minutes Till Dawn successfully.");
+        assert_eq!(app.status, "Installed 20 Minutes Till Dawn successfully.");
+        assert!(app.status_set_at.is_some());
+
+        // Esc clears status immediately
+        app.handle(Intent::Cancel);
+        assert!(app.status.is_empty());
+        assert!(app.status_set_at.is_none());
+
+        // Now test 4s timeout expiration in poll_tick
+        app.say("Temporary toast notification");
+        assert!(!app.status.is_empty());
+        // Backdate status_set_at by 5 seconds
+        app.status_set_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(5));
+        let updated = app.poll_tick();
+        assert!(updated);
+        assert!(app.status.is_empty());
+        assert!(app.status_set_at.is_none());
+    }
+
+    #[test]
+    fn test_marker_redraw_coalescing() {
+        let mut app = test_app();
+        app.selection_settled_at = None;
+        app.manifest_settled_at = None;
+        app.status_set_at = None;
+        while app.metadata_mgr.poll_updates() {}
+        while app.artwork_mgr.try_recv().is_some() {}
+        while app.resize_rx.try_recv().is_ok() {}
+
+        app.active_install = Some(ActiveInstall::mock_for_test("app1", "Game Alpha"));
+
+        // If less than 250ms elapsed, redraw is coalesced (returns false)
+        app.last_progress_ui_update = Instant::now();
+        let updated_fast = app.poll_tick();
+        assert!(
+            !updated_fast,
+            "Progress redraw within 250ms must be coalesced"
+        );
+
+        // If >= 250ms elapsed, redraw triggers (returns true)
+        app.last_progress_ui_update = Instant::now() - Duration::from_millis(300);
+        let updated_slow = app.poll_tick();
+        assert!(
+            updated_slow,
+            "Progress redraw after 250ms must trigger redraw"
+        );
+    }
+
+    #[test]
+    fn test_escape_from_launch_args_returns_to_menu() {
+        let mut app = test_app();
+        let app_name = "app2".to_string(); // installed game
+
+        // 1. Esc from Launch Arguments modal returns to game menu
+        app.mode = Mode::Input {
+            title: "Launch Arguments (Game Beta)".into(),
+            buf: "--test".into(),
+            op: Op::SetPerGameLaunchArgs(app_name.clone()),
+        };
+        app.handle(Intent::Cancel);
+        match app.mode {
+            Mode::Menu(ref m) => {
+                assert!(m.title.contains("Game Beta"));
+                assert!(m.items.iter().any(|(s, _)| s.contains("Launch Arguments")));
+            }
+            _ => panic!("Expected Mode::Menu after Esc from Launch Arguments"),
+        }
+
+        // 2. Enter save from Launch Arguments modal also returns to game menu
+        app.mode = Mode::Input {
+            title: "Launch Arguments (Game Beta)".into(),
+            buf: "--new-flag".into(),
+            op: Op::SetPerGameLaunchArgs(app_name.clone()),
+        };
+        app.handle(Intent::Enter);
+        match app.mode {
+            Mode::Menu(ref m) => {
+                assert!(m.title.contains("Game Beta"));
+            }
+            _ => panic!("Expected Mode::Menu after Enter from Launch Arguments"),
+        }
+
+        // 3. Esc from Prefix modal returns to game menu
+        app.mode = Mode::Input {
+            title: "Custom Wine Prefix (Game Beta)".into(),
+            buf: "/tmp/custom-prefix".into(),
+            op: Op::SetPerGamePrefix(app_name.clone()),
+        };
+        app.handle(Intent::Cancel);
+        match app.mode {
+            Mode::Menu(ref m) => {
+                assert!(m.title.contains("Game Beta"));
+                assert!(m.items.iter().any(|(s, _)| s.contains("Prefix")));
+            }
+            _ => panic!("Expected Mode::Menu after Esc from Prefix modal"),
+        }
+    }
+
+    #[test]
+    fn test_platinum_game_proton_not_needed() {
+        let mut app = test_app();
+        let app_name = "app2".to_string(); // Game Beta
+
+        // When Platinum on ProtonDB and no custom override
+        app.selected_details = Some(GameDetails {
+            app_name: app_name.clone(),
+            title: "Game Beta".into(),
+            protondb_tier: Some("Platinum".into()),
+            ..Default::default()
+        });
+        let menu_platinum = app.installed_menu(&app_name);
+        let proton_item = menu_platinum
+            .items
+            .iter()
+            .find(|(label, _)| label.starts_with("Proton Version:"))
+            .expect("Proton Version menu item should exist");
+        assert!(
+            proton_item.0.contains("Not needed (Platinum)"),
+            "Expected 'Not needed (Platinum)', got '{}'",
+            proton_item.0
+        );
+
+        // When custom Proton override is set, shows custom version
+        app.cfg.games.insert(
+            app_name.clone(),
+            config::GameConfig {
+                proton: Some("GE-Proton9-25".into()),
+                ..Default::default()
+            },
+        );
+        let menu_custom = app.installed_menu(&app_name);
+        let proton_custom_item = menu_custom
+            .items
+            .iter()
+            .find(|(label, _)| label.starts_with("Proton Version:"))
+            .expect("Proton Version menu item should exist");
+        assert!(
+            proton_custom_item.0.contains("GE-Proton9-25"),
+            "Expected 'GE-Proton9-25', got '{}'",
+            proton_custom_item.0
+        );
     }
 }

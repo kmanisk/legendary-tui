@@ -78,7 +78,7 @@ pub fn fmt_size(bytes: u64) -> String {
     const K: f64 = 1024.0;
     let b = bytes as f64;
     if b >= G {
-        format!("{:.1} GiB", b / G)
+        format!("{:.2} GiB", b / G)
     } else if b >= M {
         format!("{:.1} MiB", b / M)
     } else if b >= K {
@@ -88,9 +88,36 @@ pub fn fmt_size(bytes: u64) -> String {
     }
 }
 
+pub fn fmt_game_size(bytes: u64, external: Option<&str>, third_party: Option<&str>) -> String {
+    let base = fmt_size(bytes);
+    if bytes < 100 * 1024 && (external.is_some() || third_party.is_some()) {
+        let launcher = external.or(third_party).unwrap_or("Third-party launcher");
+        format!("{base} (Launcher stub • {launcher})")
+    } else {
+        base
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_fmt_game_size_stub_vs_normal() {
+        assert_eq!(
+            fmt_game_size(1468, Some("The EA App"), None),
+            "1.4 KiB (Launcher stub • The EA App)"
+        );
+        assert_eq!(
+            fmt_game_size(1468, None, Some("Ubisoft Connect")),
+            "1.4 KiB (Launcher stub • Ubisoft Connect)"
+        );
+        assert_eq!(
+            fmt_game_size(50 * 1024 * 1024 * 1024, Some("The EA App"), None),
+            "50.00 GiB"
+        );
+        assert_eq!(fmt_game_size(1468, None, None), "1.4 KiB");
+    }
 
     #[test]
     fn sizes_and_symlink_skip() {
@@ -102,7 +129,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("a/f1"), root.join("loop")).ok();
         assert_eq!(dir_size_bytes(&root), 3072);
-        assert_eq!(fmt_size(3 * 1024 * 1024 * 1024), "3.0 GiB");
+        assert_eq!(fmt_size(3 * 1024 * 1024 * 1024), "3.00 GiB");
         let _ = std::fs::remove_dir_all(&root);
     }
 

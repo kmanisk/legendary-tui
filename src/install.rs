@@ -172,6 +172,28 @@ impl ActiveInstall {
             let _ = child.wait();
         }
     }
+
+    #[cfg(test)]
+    pub fn mock_for_test(app_name: &str, title: &str) -> Self {
+        let (_tx, rx) = channel();
+        Self {
+            app_name: app_name.to_string(),
+            title: title.to_string(),
+            progress: InstallProgress {
+                app_name: app_name.to_string(),
+                title: title.to_string(),
+                percentage: 50.0,
+                downloaded_bytes: 5_000_000_000,
+                total_bytes: 10_000_000_000,
+                speed_str: "25.0 MiB/s".to_string(),
+                eta_str: "03:20".to_string(),
+                status_stage: "Downloading".to_string(),
+            },
+            child: None,
+            rx,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 /// Parse progress numbers from a line of legendary output.
