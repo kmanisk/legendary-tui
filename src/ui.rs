@@ -2599,7 +2599,7 @@ mod tests {
     #[test]
     fn test_filter_rows_by_priority_uninstalled() {
         let uninstalled_rows = vec![
-            ("State:", vec![Span::raw("Uninstalled")]),
+            ("State:", vec![Span::raw("Not installed")]),
             ("Version:", vec![Span::raw("1.0")]),
             ("Download:", vec![Span::raw("10 GB")]),
             ("Install:", vec![Span::raw("12 GB")]),

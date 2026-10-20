@@ -2,11 +2,19 @@
 name = "legendary-tui"
 version = "1.0.2"
 edition = "2021"
+authors = ["Kumar Manisk <mathewmanisk699@gmail.com>"]
 description = "Fast, keyboard-driven Ratatui TUI frontend for Legendary Epic Games Store CLI"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/kmanisk/legendary-tui"
+homepage = "https://github.com/kmanisk/legendary-tui"
+documentation = "https://docs.rs/legendary-tui"
 readme = "README.md"
 keywords = ["epic-games", "legendary", "tui", "ratatui", "gaming"]
 categories = ["command-line-utilities", "games"]
+exclude = [
+    "assets/*",
+    "aur/*",
+]
 
 [[bin]]
 name = "legendary-tui"
