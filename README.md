@@ -1,8 +1,10 @@
 # legendary-tui
 
-[![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
-[![AUR package](https://img.shields.io/aur/version/legendary-tui)](https://aur.archlinux.org/packages/legendary-tui)
-[![Interface](https://img.shields.io/badge/interface-ratatui-blue.svg)](https://github.com/ratatui/ratatui)
+[![Rust](https://img.shields.io/badge/Rust-1.80%2B-000000?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![AUR](https://img.shields.io/aur/version/legendary-tui?style=flat-square)](https://aur.archlinux.org/packages/legendary-tui)
+[![Stars](https://img.shields.io/github/stars/kmanisk/legendary-tui?style=flat-square)](https://github.com/kmanisk/legendary-tui/stargazers)
+[![Platform](https://img.shields.io/badge/platform-Linux-FCC624?style=flat-square&logo=linux&logoColor=black)](#installation)
+[![Interface](https://img.shields.io/badge/interface-Ratatui-6A5ACD?style=flat-square)](https://github.com/ratatui/ratatui)
 
 A lightweight, keyboard-driven Ratatui TUI frontend for the [Legendary](https://github.com/derrod/legendary) Epic Games Store CLI, designed for Linux gaming desktops and handhelds.
 
